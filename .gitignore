@@ -1,0 +1,8 @@
+node_modules/
+.next/
+.env
+.env.*
+bot/.env
+duman-art/.env.local
+!.env.example
+!.env.local.example
