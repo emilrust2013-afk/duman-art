@@ -1,4 +1,7 @@
 {
+  "scripts": {
+    "start": "node bot/index.js"
+  },
   "dependencies": {
     "dotenv": "^18.0.1",
     "telegraf": "^4.16.3"

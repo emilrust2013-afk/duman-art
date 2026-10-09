@@ -1,6 +1,11 @@
-require("dotenv").config({
-  path: require("path").join(__dirname, ".env"),
-});
+const path = require("path");
+const dotenv = require("dotenv");
+
+// Порядок: переменные окружения хостинга > bot/.env > корневой .env.
+// dotenv не перезаписывает уже заданные переменные, поэтому первый
+// найденный источник побеждает. Отсутствующий файл просто пропускается.
+dotenv.config({ path: path.join(__dirname, ".env"), quiet: true });
+dotenv.config({ path: path.join(__dirname, "..", ".env"), quiet: true });
 
 const { Telegraf, Markup } = require("telegraf");
 
@@ -17,6 +22,14 @@ const STORE_URL = String(
   process.env.DUMAN_ART_STORE_URL || ""
 ).replace(/\/+$/, "");
 
+if (!/^https:\/\//.test(STORE_URL)) {
+  console.error(
+    "❌ DUMAN_ART_STORE_URL не задан или не начинается с https://\n" +
+      "   Укажите адрес Mini App в bot/.env, корневом .env или в переменных окружения хостинга."
+  );
+  process.exit(1);
+}
+
 const ADMIN_CHAT_IDS = String(
   process.env.TELEGRAM_ADMIN_CHAT_IDS ||
     process.env.TELEGRAM_ADMIN_CHAT_ID ||
@@ -24,25 +37,35 @@ const ADMIN_CHAT_IDS = String(
 )
   .split(/[;,]/)
   .map((value) => value.trim())
-  .filter(Boolean);
+  .filter((value) => /^-?\d+$/.test(value));
+
+if (ADMIN_CHAT_IDS.length === 0) {
+  console.warn(
+    "⚠️ TELEGRAM_ADMIN_CHAT_IDS пуст — кнопка админ-панели не будет показана никому."
+  );
+}
 
 const bot = new Telegraf(token);
 
-function getIds(ctx) {
-  return [
-    ctx.from?.id,
-    ctx.chat?.id,
-  ]
-    .filter((id) => id !== undefined && id !== null)
-    .map(String);
+// Администратор определяется только по ID пользователя, не по чату и не по username.
+function isAdmin(ctx) {
+  const userId = ctx.from?.id;
+
+  return (
+    userId !== undefined &&
+    ADMIN_CHAT_IDS.includes(String(userId))
+  );
 }
 
-function isAdmin(ctx) {
-  const ids = getIds(ctx);
-
-  return ids.some((id) =>
-    ADMIN_CHAT_IDS.includes(id)
-  );
+function shopKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.webApp(
+        "🛍 Открыть магазин",
+        STORE_URL
+      ),
+    ],
+  ]);
 }
 
 function mainMenu(ctx) {
@@ -58,7 +81,7 @@ function mainMenu(ctx) {
   if (isAdmin(ctx)) {
     buttons.push([
       Markup.button.webApp(
-        "🔐 Админка",
+        "🔐 Админ-панель",
         `${STORE_URL}/admin`
       ),
     ]);
@@ -97,11 +120,18 @@ bot.start(async (ctx) => {
   );
 });
 
-bot.command("shop", async (ctx) => {
+async function sendShop(ctx) {
   await ctx.reply(
-    "🛍 Duman Art",
-    mainMenu(ctx)
+    "🛍 Duman Art — нажмите кнопку, чтобы открыть магазин.",
+    shopKeyboard()
   );
+}
+
+bot.command("shop", sendShop);
+
+bot.action("shop", async (ctx) => {
+  await ctx.answerCbQuery();
+  await sendShop(ctx);
 });
 
 bot.command("myid", async (ctx) => {
@@ -154,11 +184,15 @@ async function startBot() {
     console.log("🔐 ADMIN IDS:", ADMIN_CHAT_IDS.length);
     console.log("━━━━━━━━━━━━━━━━━━━━");
 
-    await bot.launch({
-      dropPendingUpdates: true,
-    });
-
-    console.log("✅ Duman Art bot запущен и ожидает сообщения...");
+    // launch() завершается только при остановке бота, поэтому
+    // сообщение о запуске выводим в колбэке onLaunch.
+    await bot.launch(
+      {
+        dropPendingUpdates: true,
+      },
+      () =>
+        console.log("✅ Duman Art bot запущен и ожидает сообщения...")
+    );
   } catch (error) {
     console.error("❌ Бот не смог запуститься:");
     console.error(error);
@@ -177,6 +211,3 @@ process.once("SIGTERM", () => {
   console.log("🛑 Бот остановлен");
   bot.stop("SIGTERM");
 });
-
-// Не даём процессу завершиться
-setInterval(() => {}, 1000);
