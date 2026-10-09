@@ -2,11 +2,17 @@
   "name": "duman-art",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=22.9.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "webhook:set": "node --env-file-if-exists=.env.local scripts/set-webhook.mjs",
+    "webhook:delete": "node --env-file-if-exists=.env.local scripts/delete-webhook.mjs",
+    "webhook:info": "node --env-file-if-exists=.env.local scripts/webhook-info.mjs"
   },
   "dependencies": {
     "firebase": "^12.19.0",

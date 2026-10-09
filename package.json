@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "start": "node bot/index.js"
+    "start": "node bot/index.js",
+    "webhook:delete": "npm --prefix duman-art run webhook:delete"
   },
   "dependencies": {
     "dotenv": "^18.0.1",

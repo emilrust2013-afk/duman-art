@@ -1,3 +1,14 @@
+// Этот бот на long polling оставлен только для локальной разработки.
+// В продакшене бот работает через webhook внутри Next.js
+// (duman-art/app/api/telegram/webhook). Пока webhook установлен, polling
+// не работает: сначала выполните npm run webhook:delete, а после
+// разработки — снова npm run webhook:set (в папке duman-art).
+console.warn(
+  "⚠️ bot/index.js — режим long polling для локальной разработки.\n" +
+    "   Если у бота установлен webhook, polling работать не будет.\n" +
+    "   Удалить webhook: npm run webhook:delete (в duman-art или в корне)."
+);
+
 const path = require("path");
 const dotenv = require("dotenv");
 
@@ -177,6 +188,19 @@ bot.catch((error) => {
 async function startBot() {
   try {
     const me = await bot.telegram.getMe();
+
+    // launch() молча вызывает deleteWebhook, и сайт перестал бы получать
+    // обновления. Поэтому при установленном webhook не запускаемся.
+    const webhook = await bot.telegram.getWebhookInfo();
+
+    if (webhook.url) {
+      console.error(
+        `❌ У бота установлен webhook: ${webhook.url}\n` +
+          "   Long polling несовместим с webhook. Если нужен локальный бот,\n" +
+          "   выполните npm run webhook:delete, а потом верните npm run webhook:set."
+      );
+      process.exit(1);
+    }
 
     console.log("━━━━━━━━━━━━━━━━━━━━");
     console.log("🤖 Бот:", `@${me.username}`);
