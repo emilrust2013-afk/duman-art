@@ -1,6 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import Script from "next/script";
 import {
   browserLocalPersistence,
   onAuthStateChanged,
@@ -28,8 +29,6 @@ import {
 } from "firebase/storage";
 
 import { auth, db, storage } from "../firebase";
-import CollectionManager from "./CollectionManager";
-import CollectionPicker from "./CollectionPicker";
 
 type Product = {
   id: string;
@@ -62,6 +61,8 @@ type OrderItem = {
 type Order = {
   id: string;
   userId?: string;
+  telegramUserId?: number | string | null;
+  telegramUsername?: string | null;
 
   customerName?: string;
   phone?: string;
@@ -84,6 +85,15 @@ type Order = {
 const ADMINS = [
   "emil@dumanart.local",
   "mama@dumanart.local",
+];
+
+const COLLECTIONS = [
+  "Elvi",
+  "Aiden",
+  "Gumly Gelin",
+  "Gra",
+  "Exclusive",
+  "Zion",
 ];
 
 function formatPrice(value: number) {
@@ -114,11 +124,10 @@ export default function AdminPage() {
 
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
-  const [showLoginPassword, setShowLoginPassword] = useState(false);
   const [loginError, setLoginError] = useState("");
 
   const [activeSection, setActiveSection] = useState<
-    "add" | "products" | "collections" | "orders" | "settings"
+    "add" | "products" | "orders" | "settings"
   >("add");
 
   const [message, setMessage] = useState("");
@@ -134,7 +143,7 @@ export default function AdminPage() {
   const [descriptionUz, setDescriptionUz] = useState("");
 
   const [price, setPrice] = useState("");
-  const [productCollection, setProductCollection] = useState("");
+  const [productCollection, setProductCollection] = useState("Elvi");
 
   const [available, setAvailable] = useState(true);
   const [newImages, setNewImages] = useState<File[]>([]);
@@ -174,6 +183,7 @@ export default function AdminPage() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [openedOrderId, setOpenedOrderId] = useState<string | null>(null);
+  const [statusSavingId, setStatusSavingId] = useState<string | null>(null);
 
   // =========================
   // SETTINGS
@@ -275,10 +285,21 @@ export default function AdminPage() {
 
       const snapshot = await getDocs(q);
 
-      const list: Order[] = snapshot.docs.map((item) => ({
-        id: item.id,
-        ...(item.data() as Omit<Order, "id">),
-      }));
+      const list: Order[] = snapshot.docs.map((item) => {
+        const data = item.data() as any;
+        const customer = data.customer || {};
+
+        return {
+          id: item.id,
+          ...data,
+          customerName: data.customerName || customer.name || "",
+          phone: data.phone || customer.phone || "",
+          address: data.address || customer.address || "",
+          comment: data.comment || customer.comment || "",
+          telegramUserId: data.telegramUserId ?? null,
+          telegramUsername: data.telegramUsername ?? null,
+        };
+      });
 
       setOrders(list);
     } catch (error) {
@@ -289,10 +310,21 @@ export default function AdminPage() {
         const snapshot = await getDocs(collection(db, "orders"));
 
         const list: Order[] = snapshot.docs
-          .map((item) => ({
-            id: item.id,
-            ...(item.data() as Omit<Order, "id">),
-          }))
+          .map((item) => {
+            const data = item.data() as any;
+            const customer = data.customer || {};
+
+            return {
+              id: item.id,
+              ...data,
+              customerName: data.customerName || customer.name || "",
+              phone: data.phone || customer.phone || "",
+              address: data.address || customer.address || "",
+              comment: data.comment || customer.comment || "",
+              telegramUserId: data.telegramUserId ?? null,
+              telegramUsername: data.telegramUsername ?? null,
+            };
+          })
           .sort((a, b) => {
             return (
               (b.createdAt?.seconds || 0) -
@@ -504,7 +536,7 @@ export default function AdminPage() {
       setDescriptionUz("");
 
       setPrice("");
-      setProductCollection("");
+      setProductCollection("Elvi");
       setAvailable(true);
       setNewImages([]);
 
@@ -720,33 +752,77 @@ export default function AdminPage() {
   // ORDER STATUS
   // =========================
 
+  function getTelegramInitData() {
+    if (typeof window === "undefined") return "";
+
+    return String(
+      (window as any).Telegram?.WebApp?.initData || ""
+    );
+  }
+
   async function changeOrderStatus(
     orderId: string,
     status: string
   ) {
     if (!isAdmin) return;
 
+    const order = orders.find((item) => item.id === orderId);
+
     try {
+      setStatusSavingId(orderId);
+
       await updateDoc(
         doc(db, "orders", orderId),
         {
           status,
+          statusUpdatedAt: serverTimestamp(),
         }
       );
 
       setOrders((current) =>
-        current.map((order) =>
-          order.id === orderId
-            ? {
-                ...order,
-                status,
-              }
-            : order
+        current.map((item) =>
+          item.id === orderId
+            ? { ...item, status }
+            : item
         )
       );
+
+      // Отправляем клиенту сообщение прямо из Telegram Mini App.
+      if (order?.telegramUserId) {
+        const initData = getTelegramInitData();
+
+        if (initData) {
+          const response = await fetch("/api/telegram/status", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              initData,
+              telegramUserId: order.telegramUserId,
+              telegramUsername: order.telegramUsername || null,
+              orderId,
+              status,
+            }),
+          });
+
+          if (!response.ok) {
+            console.error(
+              "Telegram status notification failed:",
+              await response.text()
+            );
+            setMessage(
+              "Статус изменён, но сообщение клиенту не отправилось"
+            );
+            return;
+          }
+        }
+      }
     } catch (error) {
       console.error(error);
       setMessage("Не удалось изменить статус");
+    } finally {
+      setStatusSavingId(null);
     }
   }
 
@@ -896,74 +972,82 @@ export default function AdminPage() {
 
   if (!user || !isAdmin) {
     return (
-      <main className="min-h-screen bg-[#171717] px-5 py-10">
-        <div className="mx-auto flex min-h-[90vh] max-w-md items-center justify-center">
-          <div className="w-full rounded-[32px] bg-[#f6f2ec] p-6 shadow-2xl">
-            <div className="text-center">
-              <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-white text-3xl shadow-sm">
-                💎
-              </div>
+      <main className="min-h-screen bg-[#171717] px-4 py-6 text-[#171717]">
+        <div className="mx-auto flex min-h-[calc(100vh-48px)] w-full max-w-[430px] items-center justify-center">
+          <div className="w-full overflow-hidden rounded-[34px] bg-[#f7f3ed] shadow-[0_24px_80px_rgba(0,0,0,0.32)]">
+            <div className="relative px-6 pb-7 pt-8 sm:px-8 sm:pt-10">
+              <div className="absolute right-6 top-6 h-24 w-24 rounded-full bg-[#e8dece]/70 blur-2xl" />
+              <div className="absolute -left-8 bottom-0 h-20 w-20 rounded-full bg-[#ddd1c0]/50 blur-2xl" />
 
-              <p className="mt-5 text-[10px] uppercase tracking-[0.3em] text-[#a28b6c]">
-                DUMAN ART
-              </p>
-
-              <h1 className="mt-2 font-serif text-3xl">
-                Админ-панель
-              </h1>
-
-              <p className="mt-2 text-sm text-[#777066]">
-                Доступ только для сотрудников Duman Art
-              </p>
-            </div>
-
-            <form
-              onSubmit={handleLogin}
-              className="mt-8 space-y-4"
-            >
-              <input
-                type="email"
-                value={loginEmail}
-                onChange={(e) =>
-                  setLoginEmail(e.target.value)
-                }
-                placeholder="Email"
-                className="w-full rounded-2xl border border-[#ddd4c8] bg-white px-4 py-4 text-sm outline-none focus:border-[#171717]"
-              />
-
-              <div className="relative">
-                <input
-                  type={showLoginPassword ? "text" : "password"}
-                  value={loginPassword}
-                  onChange={(e) =>
-                    setLoginPassword(e.target.value)
-                  }
-                  placeholder="Пароль"
-                  className="w-full rounded-2xl border border-[#ddd4c8] bg-white px-4 py-4 pr-12 text-sm outline-none focus:border-[#171717]"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowLoginPassword((value) => !value)}
-                  className="absolute right-3 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-lg"
-                  aria-label={showLoginPassword ? "Скрыть пароль" : "Показать пароль"}
-                >
-                  {showLoginPassword ? "🙈" : "👁️"}
-                </button>
-              </div>
-
-              {loginError && (
-                <div className="rounded-2xl bg-red-50 px-4 py-3 text-sm text-red-700">
-                  {loginError}
+              <div className="relative text-center">
+                <div className="mx-auto flex h-20 w-20 items-center justify-center overflow-hidden rounded-full border border-[#e4dbcf] bg-white shadow-[0_10px_30px_rgba(0,0,0,0.08)]">
+                  <img
+                    src="/logo.png"
+                    alt="Duman Art"
+                    className="h-14 w-14 object-contain"
+                  />
                 </div>
-              )}
 
-              <button
-                type="submit"
-                className="w-full rounded-full bg-[#171717] px-5 py-4 text-sm font-medium text-white transition-transform active:scale-[0.98]"
-              >
-                Войти
-              </button>
-            </form>
+                <p className="mt-5 text-[10px] font-semibold uppercase tracking-[0.38em] text-[#9b8465]">
+                  DUMAN ART
+                </p>
+
+                <h1 className="mt-3 text-[30px] font-semibold tracking-[-0.03em] text-[#191817]">
+                  Вход для сотрудников
+                </h1>
+
+                <p className="mx-auto mt-2 max-w-[290px] text-[13px] leading-5 text-[#777066]">
+                  Управление товарами, заказами и настройками магазина
+                </p>
+              </div>
+
+              <form onSubmit={handleLogin} className="relative mt-7 space-y-3.5">
+                <div>
+                  <label className="mb-2 block px-1 text-[12px] font-medium text-[#5e574f]">
+                    Email
+                  </label>
+                  <input
+                    type="email"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    placeholder="Введите рабочий email"
+                    autoComplete="username"
+                    className="w-full rounded-[20px] border border-[#ded4c7] bg-white px-4 py-4 text-[15px] text-[#171717] outline-none transition placeholder:text-[#b8afa5] focus:border-[#8f7759] focus:ring-4 focus:ring-[#b79b77]/10"
+                  />
+                </div>
+
+                <div>
+                  <label className="mb-2 block px-1 text-[12px] font-medium text-[#5e574f]">
+                    Пароль
+                  </label>
+                  <input
+                    type="password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Введите пароль"
+                    autoComplete="current-password"
+                    className="w-full rounded-[20px] border border-[#ded4c7] bg-white px-4 py-4 text-[15px] text-[#171717] outline-none transition placeholder:text-[#b8afa5] focus:border-[#8f7759] focus:ring-4 focus:ring-[#b79b77]/10"
+                  />
+                </div>
+
+                {loginError && (
+                  <div className="rounded-[18px] border border-red-100 bg-red-50 px-4 py-3 text-[13px] leading-5 text-red-700">
+                    {loginError}
+                  </div>
+                )}
+
+                <button
+                  type="submit"
+                  className="mt-1 w-full rounded-[20px] bg-[#171717] px-5 py-4 text-[15px] font-semibold text-white shadow-[0_12px_25px_rgba(23,23,23,0.18)] transition hover:bg-[#252525] active:scale-[0.99]"
+                >
+                  Войти в админ-панель
+                </button>
+
+                <p className="pt-1 text-center text-[11px] text-[#9a9187]">
+                  Доступ только для авторизованных сотрудников Duman Art
+                </p>
+              </form>
+            </div>
           </div>
         </div>
       </main>
@@ -975,8 +1059,20 @@ export default function AdminPage() {
   // =========================
 
   return (
-    <main className="min-h-screen bg-[#f6f2ec] text-[#171717]">
-      <div className="mx-auto max-w-7xl px-4 py-5 md:px-8">
+    <>
+      <Script
+        src="https://telegram.org/js/telegram-web-app.js?63"
+        strategy="afterInteractive"
+        onLoad={() => {
+          try {
+            (window as any).Telegram?.WebApp?.ready?.();
+            (window as any).Telegram?.WebApp?.expand?.();
+          } catch {}
+        }}
+      />
+
+      <main className="min-h-screen bg-[#f6f2ec] text-[#171717] pb-24">
+      <div className="mx-auto w-full max-w-3xl px-3 py-3 pb-8 md:px-8">
         {/* HEADER */}
         <header className="mb-6 rounded-[28px] bg-[#171717] p-5 text-white shadow-lg">
           <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -992,6 +1088,10 @@ export default function AdminPage() {
               <p className="mt-1 text-xs text-white/60">
                 {user.email}
               </p>
+
+              <p className="mt-2 text-[11px] text-white/45">
+                📱 Duman Art · управление с телефона
+              </p>
             </div>
 
             <button
@@ -1005,11 +1105,10 @@ export default function AdminPage() {
         </header>
 
         {/* MENU */}
-        <nav className="mb-6 grid grid-cols-2 gap-2 md:grid-cols-5">
+        <nav className="sticky top-2 z-30 mb-5 grid grid-cols-2 gap-2 md:grid-cols-4">
           {[
             ["add", "➕ Добавить"],
             ["products", "💎 Товары"],
-            ["collections", "🏷 Коллекции"],
             ["orders", "📦 Заказы"],
             ["settings", "💳 Настройки"],
           ].map(([key, label]) => (
@@ -1058,7 +1157,8 @@ export default function AdminPage() {
               </h2>
 
               <p className="mt-2 text-sm text-[#777066]">
-                Русское и узбекское название и описание обязательны. Коллекцию можно выбрать или создать прямо здесь.
+                Русское и узбекское название и описание
+                обязательны.
               </p>
             </div>
 
@@ -1150,10 +1250,25 @@ export default function AdminPage() {
                   />
                 </div>
 
-                <CollectionPicker
-                  value={productCollection}
-                  onChange={setProductCollection}
-                />
+                <div>
+                  <label className="mb-2 block text-sm font-medium">
+                    Коллекция
+                  </label>
+
+                  <select
+                    value={productCollection}
+                    onChange={(e) =>
+                      setProductCollection(e.target.value)
+                    }
+                    className="w-full rounded-2xl border border-[#ddd4c8] bg-white px-4 py-4 outline-none"
+                  >
+                    {COLLECTIONS.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
                 <label className="flex cursor-pointer items-center gap-3 rounded-2xl border border-[#ddd4c8] px-4 py-4">
                   <input
@@ -1334,18 +1449,6 @@ export default function AdminPage() {
               </div>
             )}
           </section>
-        )}
-
-        {/* =========================
-            COLLECTIONS
-        ========================= */}
-
-        {activeSection === "collections" && (
-          <CollectionManager
-            onChanged={() => {
-              setMessage("✅ Список коллекций обновлён");
-            }}
-          />
         )}
 
         {/* =========================
@@ -1535,7 +1638,7 @@ export default function AdminPage() {
                             <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
                               {[
                                 "Новый",
-                                "В обработке",
+                                "Подтверждён",
                                 "В доставке",
                                 "Завершён",
                               ].map((status) => (
@@ -1548,13 +1651,14 @@ export default function AdminPage() {
                                       status
                                     )
                                   }
-                                  className={`rounded-2xl px-3 py-3 text-xs ${
+                                  disabled={statusSavingId === order.id}
+                                  className={`rounded-2xl px-3 py-3 text-xs transition disabled:cursor-wait disabled:opacity-60 ${
                                     order.status === status
                                       ? "bg-[#171717] text-white"
                                       : "bg-[#f1ece5]"
                                   }`}
                                 >
-                                  {status}
+                                  {statusSavingId === order.id ? "Сохраняем..." : status}
                                 </button>
                               ))}
                             </div>
@@ -1799,10 +1903,25 @@ export default function AdminPage() {
                   />
                 </div>
 
-                <CollectionPicker
-                  value={editCollection}
-                  onChange={setEditCollection}
-                />
+                <div>
+                  <label className="mb-2 block text-sm font-medium">
+                    Коллекция
+                  </label>
+
+                  <select
+                    value={editCollection}
+                    onChange={(e) =>
+                      setEditCollection(e.target.value)
+                    }
+                    className="w-full rounded-2xl border border-[#ddd4c8] bg-white px-4 py-4"
+                  >
+                    {COLLECTIONS.map((item) => (
+                      <option key={item} value={item}>
+                        {item}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
                 <label className="flex items-center gap-3 rounded-2xl border border-[#ddd4c8] bg-white px-4 py-4">
                   <input
@@ -1881,6 +2000,7 @@ export default function AdminPage() {
           </div>
         </div>
       )}
-    </main>
+      </main>
+    </>
   );
 }
