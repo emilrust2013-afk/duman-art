@@ -151,7 +151,8 @@ export async function POST(request: Request) {
 
     // Telegram ID — только из подписанного initData, иначе null.
     const telegramUser = validateTelegramInitData(
-      typeof body.initData === "string" ? body.initData : ""
+      typeof body.initData === "string" ? body.initData : "",
+      "orders/create"
     );
 
     const orderRef = await db.collection("orders").add({

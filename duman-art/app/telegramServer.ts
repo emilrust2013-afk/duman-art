@@ -20,22 +20,42 @@ export function escapeHtml(value: unknown) {
 
 // Проверяет подпись initData Telegram Mini App и возвращает пользователя.
 // Данные старше 24 часов не принимаются.
-export function validateTelegramInitData(initData: string): TelegramUser | null {
+// context — метка для серверного лога: при отказе пишется только причина,
+// без самих данных и токена.
+export function validateTelegramInitData(
+  initData: string,
+  context?: string
+): TelegramUser | null {
+  const reject = (reason: string) => {
+    if (context) {
+      console.warn(`Telegram initData rejected (${context}): ${reason}`);
+    }
+
+    return null;
+  };
+
   const botToken = process.env.TELEGRAM_BOT_TOKEN;
 
-  if (!botToken || !initData) {
-    return null;
+  if (!botToken) {
+    return reject("TELEGRAM_BOT_TOKEN is not configured");
+  }
+
+  if (!initData) {
+    return reject("no initData (opened outside Telegram Mini App?)");
   }
 
   const params = new URLSearchParams(initData);
   const receivedHash = params.get("hash");
 
   if (!receivedHash) {
-    return null;
+    return reject("no hash");
   }
 
+  // По документации Telegram (Validating data received via the Mini App)
+  // data-check-string для HMAC строится из ВСЕХ полей, кроме hash.
+  // Поле signature исключается только при проверке Ed25519 для третьих лиц,
+  // поэтому здесь его не удаляем.
   params.delete("hash");
-  params.delete("signature");
 
   const dataCheckString = Array.from(params.entries())
     .sort(([a], [b]) => a.localeCompare(b))
@@ -59,23 +79,29 @@ export function validateTelegramInitData(initData: string): TelegramUser | null 
     receivedBuffer.length !== calculatedBuffer.length ||
     !crypto.timingSafeEqual(receivedBuffer, calculatedBuffer)
   ) {
-    return null;
+    return reject("hash mismatch");
   }
 
   const authDate = Number(params.get("auth_date") || 0);
 
-  if (
-    !authDate ||
-    Math.abs(Math.floor(Date.now() / 1000) - authDate) > 24 * 60 * 60
-  ) {
-    return null;
+  if (!authDate) {
+    return reject("no auth_date");
+  }
+
+  const ageSeconds = Math.floor(Date.now() / 1000) - authDate;
+
+  if (Math.abs(ageSeconds) > 24 * 60 * 60) {
+    return reject(`auth_date expired (age ${ageSeconds}s)`);
   }
 
   try {
     const user = JSON.parse(params.get("user") || "") as TelegramUser;
-    return Number.isSafeInteger(user?.id) ? user : null;
+
+    return Number.isSafeInteger(user?.id)
+      ? user
+      : reject("user has no valid id");
   } catch {
-    return null;
+    return reject("no user or user is not valid JSON");
   }
 }
 
