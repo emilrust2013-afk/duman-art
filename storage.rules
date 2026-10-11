@@ -1,19 +1,37 @@
 rules_version = '2';
 
+// Duman Art — правила Storage.
+// Администратор — пользователь с custom claim admin: true.
 service firebase.storage {
   match /b/{bucket}/o {
 
-    match /products/{allPaths=**} {
-      allow read: if true;
-      allow write: if request.auth != null;
+    function isAdmin() {
+      return request.auth != null && request.auth.token.admin == true;
     }
 
-    match /receipts/{userId}/{orderId}/{fileName} {
-      allow read: if request.auth != null;
-      allow write: if request.auth != null
-        && request.auth.uid == userId
-        && request.resource.size < 10 * 1024 * 1024
+    function isImageUnder10MB() {
+      return request.resource.size < 10 * 1024 * 1024
         && request.resource.contentType.matches('image/.*');
     }
+
+    // Фото товаров: смотреть всем, загружать и удалять — только админам.
+    match /products/{allPaths=**} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isImageUnder10MB();
+      allow delete: if isAdmin();
+    }
+
+    // Чеки: загружает только владелец в свою папку, без перезаписи и удаления.
+    // Читать — владелец или админ. (Ссылка с токеном, которую сервер кладёт
+    // в заказ, работает независимо от этих правил.)
+    match /receipts/{userId}/{orderId}/{fileName} {
+      allow read: if request.auth != null
+        && (request.auth.uid == userId || isAdmin());
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && isImageUnder10MB();
+    }
+
+    // Всё остальное запрещено.
   }
 }

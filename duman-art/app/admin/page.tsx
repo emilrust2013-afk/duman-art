@@ -33,7 +33,6 @@ import {
   ADMIN_PAYMENT_BUTTONS,
   INITIAL_ORDER_STATUS,
   ORDER_STATUSES,
-  isAdminEmail,
 } from "../shopConfig";
 
 type Product = {
@@ -122,6 +121,7 @@ function getProductDescription(product: Product) {
 export default function AdminPage() {
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
 
   const [loginEmail, setLoginEmail] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
@@ -205,15 +205,27 @@ export default function AdminPage() {
   useEffect(() => {
     setPersistence(auth, browserLocalPersistence).catch(console.error);
 
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      // Права админа — custom claim admin: true. Токен обновляем
+      // принудительно, чтобы новые права применились без повторного входа.
+      let admin = false;
+
+      if (currentUser) {
+        try {
+          const tokenResult = await currentUser.getIdTokenResult(true);
+          admin = tokenResult.claims.admin === true;
+        } catch (error) {
+          console.error(error);
+        }
+      }
+
       setUser(currentUser);
+      setIsAdmin(admin);
       setAuthLoading(false);
     });
 
     return () => unsubscribe();
   }, []);
-
-  const isAdmin = useMemo(() => isAdminEmail(user?.email), [user]);
 
   // =========================
   // LOAD PRODUCTS
@@ -396,7 +408,9 @@ export default function AdminPage() {
         loginPassword
       );
 
-      if (!isAdminEmail(result.user.email)) {
+      const tokenResult = await result.user.getIdTokenResult(true);
+
+      if (tokenResult.claims.admin !== true) {
         await signOut(auth);
         setLoginError("Нет доступа к админ-панели");
         return;

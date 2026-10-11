@@ -6,6 +6,7 @@
 import { cert, getApp, getApps, initializeApp, type App } from "firebase-admin/app";
 import { getAuth, type DecodedIdToken } from "firebase-admin/auth";
 import { getFirestore } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
 
 function getAdminApp(): App {
   if (getApps().length > 0) {
@@ -46,6 +47,27 @@ export function getAdminAuth() {
 
 export function getAdminDb() {
   return getFirestore(getAdminApp());
+}
+
+// Бакет Storage — тот же, что у клиентского приложения.
+export function getAdminBucket() {
+  const bucketName = String(
+    process.env.FIREBASE_STORAGE_BUCKET ||
+      process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ||
+      ""
+  ).trim();
+
+  if (!bucketName) {
+    throw new Error("Firebase storage bucket is not configured");
+  }
+
+  return getStorage(getAdminApp()).bucket(bucketName);
+}
+
+// Администратор — пользователь с custom claim admin: true
+// (выставляется скриптом scripts/set-admin-claims.mjs).
+export function isAdminToken(token: DecodedIdToken | null | undefined) {
+  return token?.admin === true;
 }
 
 // Проверяет Firebase ID token из заголовка "Authorization: Bearer <token>".

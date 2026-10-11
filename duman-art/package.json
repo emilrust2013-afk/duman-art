@@ -12,7 +12,8 @@
     "lint": "eslint",
     "webhook:set": "node --env-file-if-exists=.env.local scripts/set-webhook.mjs",
     "webhook:delete": "node --env-file-if-exists=.env.local scripts/delete-webhook.mjs",
-    "webhook:info": "node --env-file-if-exists=.env.local scripts/webhook-info.mjs"
+    "webhook:info": "node --env-file-if-exists=.env.local scripts/webhook-info.mjs",
+    "admin:claims": "node --env-file-if-exists=.env.local scripts/set-admin-claims.mjs"
   },
   "dependencies": {
     "firebase": "^12.19.0",

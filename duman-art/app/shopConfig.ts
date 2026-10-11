@@ -1,15 +1,8 @@
 // Общие настройки магазина: используются и в браузере, и на сервере.
 // Здесь нет секретов — только списки и тексты.
 
-// Администраторы (email аккаунтов Firebase Auth).
-export const ADMIN_EMAILS = [
-  "emil@dumanart.local",
-  "mama@dumanart.local",
-];
-
-export function isAdminEmail(email: string | null | undefined) {
-  return !!email && ADMIN_EMAILS.includes(email.toLowerCase());
-}
+// Администраторы определяются custom claim admin: true в Firebase Auth
+// (scripts/set-admin-claims.mjs), а не по email.
 
 export const SHOP_PHONE = "+998 87 907 01 07";
 

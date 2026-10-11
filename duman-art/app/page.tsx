@@ -5,7 +5,6 @@ import Script from "next/script";
 import { useEffect, useState } from "react";
 
 import {
-  addDoc,
   collection,
   doc,
   getDoc,
@@ -29,18 +28,12 @@ import {
 } from "firebase/auth";
 
 import {
-  getDownloadURL,
   ref,
   uploadBytes,
 } from "firebase/storage";
 
 import { auth, db, storage } from "./firebase";
 import HomeCatalog from "./HomeCatalog";
-import {
-  INITIAL_ORDER_STATUS,
-  INITIAL_PAYMENT_STATUS,
-  isAdminEmail,
-} from "./shopConfig";
 
 type Language = "ru" | "uz";
 
@@ -85,6 +78,7 @@ type Order = {
   totalItems?: number;
   status: string;
   paymentStatus: string;
+  receiptUrl?: string;
   createdAt?: any;
   items?: {
     name: string;
@@ -335,6 +329,12 @@ export default function Home() {
   const [orders, setOrders] =
     useState<Order[]>([]);
 
+  const [isStoreAdmin, setIsStoreAdmin] =
+    useState(false);
+
+  const [receiptUploadingId, setReceiptUploadingId] =
+    useState<string | null>(null);
+
   const [editName, setEditName] =
     useState("");
   const [editPhone, setEditPhone] =
@@ -455,6 +455,18 @@ export default function Home() {
         auth,
         async (currentUser) => {
           setUser(currentUser);
+
+          // Ссылка на админ-панель — только для custom claim admin: true.
+          setIsStoreAdmin(false);
+
+          currentUser
+            ?.getIdTokenResult()
+            .then((result) =>
+              setIsStoreAdmin(
+                result.claims.admin === true
+              )
+            )
+            .catch(console.error);
 
           if (currentUser) {
             await loadProfile(
@@ -1049,7 +1061,6 @@ export default function Home() {
     0
   );
 
-  const isStoreAdmin = isAdminEmail(user?.email);
 
   function changeTab(
     newTab: Tab
@@ -1347,6 +1358,102 @@ export default function Home() {
     };
   }
 
+  // Загружает чек в receipts/{uid}/{orderId}/ и просит сервер прикрепить его
+  // к заказу и уведомить администраторов. Возвращает true, если админы уведомлены.
+  async function uploadReceiptForOrder(
+    currentUser: User,
+    orderId: string,
+    file: File
+  ) {
+    const receiptPath = `receipts/${currentUser.uid}/${orderId}/${Date.now()}-${file.name.replace(/[\\/]/g, "_")}`;
+
+    await uploadBytes(
+      ref(storage, receiptPath),
+      file,
+      { contentType: file.type || undefined }
+    );
+
+    const response = await fetch(
+      "/api/orders/receipt",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${await currentUser.getIdToken()}`,
+        },
+        body: JSON.stringify({
+          orderId,
+          receiptPath,
+        }),
+      }
+    );
+
+    const data = await response
+      .json()
+      .catch(() => null);
+
+    if (!response.ok || !data?.ok) {
+      throw new Error(
+        data?.error ||
+          `Receipt attach failed: ${response.status}`
+      );
+    }
+
+    return data.notified === true;
+  }
+
+  // Кнопка «Загрузить чек» в истории — для заказа, к которому чек
+  // не прикрепился при оформлении.
+  async function uploadReceiptFromHistory(
+    orderId: string,
+    file: File
+  ) {
+    if (!user) return;
+
+    if (!file.type.startsWith("image/")) {
+      alert(text.receiptText);
+      return;
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      alert(
+        language === "ru"
+          ? "Размер чека не должен превышать 10 МБ"
+          : "Chek hajmi 10 MB dan oshmasligi kerak"
+      );
+      return;
+    }
+
+    try {
+      setReceiptUploadingId(orderId);
+
+      const notified =
+        await uploadReceiptForOrder(
+          user,
+          orderId,
+          file
+        );
+
+      alert(
+        language === "ru"
+          ? notified
+            ? "✅ Чек загружен, магазин получил ваш заказ"
+            : "✅ Чек загружен. Магазин увидит его в списке заказов"
+          : "✅ Chek yuklandi"
+      );
+    } catch (error) {
+      console.error(error);
+
+      alert(
+        language === "ru"
+          ? "Не удалось загрузить чек. Попробуйте ещё раз"
+          : "Chekni yuklab bo‘lmadi. Qayta urinib ko‘ring"
+      );
+    } finally {
+      setReceiptUploadingId(null);
+    }
+  }
+
   async function createOrder() {
     if (!name.trim()) {
       alert(text.name);
@@ -1484,134 +1591,51 @@ export default function Home() {
         );
       }
 
-      const orderRef =
-        await addDoc(
-          collection(db, "orders"),
-          {
-            userId:
-              currentUser.uid,
-
+      // Заказ создаёт сервер: цены, сумму и статусы он берёт из базы,
+      // Telegram ID — из подписанного initData.
+      const createResponse = await fetch(
+        "/api/orders/create",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${await currentUser.getIdToken()}`,
+          },
+          body: JSON.stringify({
+            items: cart.map((item) => ({
+              productId: item.id,
+              quantity: item.quantity,
+            })),
             customer: {
               name: name.trim(),
               phone: phone.trim(),
-              address:
-                address.trim(),
-              comment:
-                comment.trim(),
+              address: address.trim(),
+              comment: comment.trim(),
             },
-
-            items: cart.map(
-              (item) => ({
-                id: item.id,
-                name: getDisplayName(item),
-                price: item.price,
-                collection:
-                  item.collection,
-                quantity:
-                  item.quantity,
-              })
-            ),
-
-            total,
-            totalItems,
-
-            telegramUserId:
-              telegramContext.user?.id || null,
-            telegramUsername:
-              telegramContext.user?.username || null,
-
-            status: INITIAL_ORDER_STATUS,
-            paymentStatus:
-              INITIAL_PAYMENT_STATUS,
-
-            receiptUrl: "",
-
-            createdAt:
-              serverTimestamp(),
-          }
-        );
-
-      const receiptRef = ref(
-        storage,
-        `receipts/${currentUser.uid}/${orderRef.id}/${Date.now()}-${receiptFile.name}`
-      );
-
-      await uploadBytes(
-        receiptRef,
-        receiptFile
-      );
-
-      const receiptUrl =
-        await getDownloadURL(
-          receiptRef
-        );
-
-      await updateDoc(
-        doc(
-          db,
-          "orders",
-          orderRef.id
-        ),
-        {
-          receiptUrl,
-          receiptFileName:
-            receiptFile.name,
+            initData: telegramContext.initData,
+          }),
         }
       );
 
-      let notificationSent = false;
+      const created = await createResponse
+        .json()
+        .catch(() => null);
 
-      try {
-        const notificationResponse =
-          await fetch("/api/telegram/order", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              // По токену сервер проверит владельца заказа и запишет
-              // проверенный Telegram ID клиента (из подписанного initData).
-              Authorization: `Bearer ${await currentUser.getIdToken()}`,
-            },
-            body: JSON.stringify({
-              initData:
-                telegramContext.initData,
-              orderId: orderRef.id,
-              customer: {
-                name: name.trim(),
-                phone: phone.trim(),
-                address: address.trim(),
-                comment: comment.trim(),
-              },
-              items: cart.map((item) => ({
-                name: getDisplayName(item),
-                price: Number(item.price || 0),
-                quantity: Number(item.quantity || 1),
-                collection: item.collection || "",
-              })),
-              total,
-              receiptUrl,
-            }),
-          });
+      if (!createResponse.ok || !created?.orderId) {
+        console.error("Order creation failed:", created);
 
-        notificationSent =
-          notificationResponse.ok;
-
-        if (!notificationResponse.ok) {
-          console.error(
-            "Telegram notification failed:",
-            await notificationResponse.text()
-          );
-        }
-      } catch (notificationError) {
-        console.error(
-          "Telegram notification error:",
-          notificationError
+        alert(
+          created?.error && language === "ru"
+            ? created.error
+            : language === "ru"
+              ? "Не удалось оформить заказ"
+              : "Buyurtmani rasmiylashtirib bo‘lmadi"
         );
+        return;
       }
 
-      setOrderNotificationSent(
-        notificationSent
-      );
-
+      // Заказ уже создан — корзину очищаем, даже если чек не загрузится:
+      // его можно догрузить из истории заказов.
       localStorage.removeItem(
         "dumanart_cart"
       );
@@ -1619,6 +1643,33 @@ export default function Home() {
       setCart([]);
       setPassword("");
       setComment("");
+
+      let notificationSent = false;
+
+      try {
+        notificationSent =
+          await uploadReceiptForOrder(
+            currentUser,
+            created.orderId,
+            receiptFile
+          );
+      } catch (receiptError) {
+        console.error(
+          "Receipt upload failed:",
+          receiptError
+        );
+
+        alert(
+          language === "ru"
+            ? "Заказ оформлен, но чек не загрузился. Загрузите его в истории заказов (Настройки → Мои заказы)."
+            : "Buyurtma qabul qilindi, lekin chek yuklanmadi. Uni buyurtmalar tarixidan yuklang."
+        );
+      }
+
+      setOrderNotificationSent(
+        notificationSent
+      );
+
       setReceiptFile(null);
 
       // Историю заказов обновляет подписка onSnapshot.
@@ -2972,6 +3023,39 @@ export default function Home() {
                                 {Number(order.total).toLocaleString("ru-RU")} сум
                               </strong>
                             </div>
+
+                            {!order.receiptUrl && (
+                              <label
+                                className={`mt-3 block rounded-2xl bg-[#171717] px-4 py-3 text-center text-sm text-white transition active:scale-[0.99] ${
+                                  receiptUploadingId === order.id
+                                    ? "cursor-wait opacity-60"
+                                    : "cursor-pointer"
+                                }`}
+                              >
+                                {receiptUploadingId === order.id
+                                  ? language === "ru"
+                                    ? "Загружаем чек..."
+                                    : "Chek yuklanmoqda..."
+                                  : text.uploadReceipt}
+                                <span className="mt-0.5 block text-[11px] opacity-70">
+                                  {text.receiptText}
+                                </span>
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  className="hidden"
+                                  disabled={receiptUploadingId !== null}
+                                  onChange={(event) => {
+                                    const file = event.target.files?.[0];
+                                    event.target.value = "";
+
+                                    if (file) {
+                                      uploadReceiptFromHistory(order.id, file);
+                                    }
+                                  }}
+                                />
+                              </label>
+                            )}
                           </div>
                         </details>
                       ))}

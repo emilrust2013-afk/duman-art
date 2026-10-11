@@ -1,10 +1,13 @@
 import { NextResponse } from "next/server";
 import { FieldValue, Timestamp } from "firebase-admin/firestore";
 
-import { getAdminDb, verifyRequestIdToken } from "../../../firebaseAdmin";
+import {
+  getAdminDb,
+  isAdminToken,
+  verifyRequestIdToken,
+} from "../../../firebaseAdmin";
 import {
   buildStatusNotification,
-  isAdminEmail,
   isOrderStatus,
   isPaymentStatus,
 } from "../../../shopConfig";
@@ -93,7 +96,7 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!isAdminEmail(admin.email)) {
+    if (!isAdminToken(admin)) {
       return NextResponse.json(
         { ok: false, error: "Нет прав администратора" },
         { status: 403 }
