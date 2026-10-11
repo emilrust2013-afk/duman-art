@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import crypto from "node:crypto";
 
+import { getAdminDb, verifyRequestIdToken } from "../../../firebaseAdmin";
+
 type TelegramUser = {
   id: number;
   first_name?: string;
@@ -110,6 +112,38 @@ function validateTelegramInitData(initData: string) {
   }
 }
 
+// Записывает в заказ Telegram ID клиента из проверенного (подписанного) initData,
+// а не из initDataUnsafe браузера. Только если Firebase ID token принадлежит
+// владельцу заказа. Любая ошибка здесь не мешает уведомлению администраторов.
+async function saveVerifiedTelegramUser(
+  request: Request,
+  orderId: string,
+  telegramUser: TelegramUser
+) {
+  try {
+    const decoded = await verifyRequestIdToken(request);
+
+    if (!decoded || orderId.includes("/")) {
+      return;
+    }
+
+    const orderRef = getAdminDb().collection("orders").doc(orderId);
+    const snapshot = await orderRef.get();
+
+    if (!snapshot.exists || snapshot.get("userId") !== decoded.uid) {
+      return;
+    }
+
+    await orderRef.update({
+      telegramUserId: telegramUser.id,
+      telegramUsername: telegramUser.username || null,
+      telegramVerified: true,
+    });
+  } catch (error) {
+    console.error("Saving verified Telegram user failed:", error);
+  }
+}
+
 function buildChatUrl(user: TelegramUser) {
   if (user.username) {
     return `https://t.me/${user.username}`;
@@ -191,6 +225,10 @@ export async function POST(request: Request) {
     const telegramUser = validateTelegramInitData(
       String(body.initData || "")
     );
+
+    if (telegramUser) {
+      await saveVerifiedTelegramUser(request, orderId, telegramUser);
+    }
 
     const itemLines = items.length
       ? items

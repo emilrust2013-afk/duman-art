@@ -40,3 +40,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Ключи сервисного аккаунта Firebase никогда не коммитим
+*firebase-adminsdk*.json

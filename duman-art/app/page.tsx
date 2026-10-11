@@ -9,7 +9,7 @@ import {
   collection,
   doc,
   getDoc,
-  getDocs,
+  onSnapshot,
   query,
   serverTimestamp,
   setDoc,
@@ -36,6 +36,11 @@ import {
 
 import { auth, db, storage } from "./firebase";
 import HomeCatalog from "./HomeCatalog";
+import {
+  INITIAL_ORDER_STATUS,
+  INITIAL_PAYMENT_STATUS,
+  isAdminEmail,
+} from "./shopConfig";
 
 type Language = "ru" | "uz";
 
@@ -278,11 +283,6 @@ const t = {
   },
 };
 
-const ADMIN_EMAILS = [
-  "emil@dumanart.local",
-  "mama@dumanart.local",
-];
-
 function createAuthEmail(phone: string) {
   const digits = phone.replace(/\D/g, "");
   return `${digits}@dumanart.local`;
@@ -460,12 +460,6 @@ export default function Home() {
             await loadProfile(
               currentUser.uid
             );
-
-            await loadOrders(
-              currentUser.uid
-            );
-          } else {
-            setOrders([]);
           }
         }
       );
@@ -506,6 +500,54 @@ export default function Home() {
       document.body.style.color = "";
     };
   }, [themeMode]);
+
+  // История заказов с живым обновлением: статус, изменённый админом,
+  // появляется у клиента сразу. Сортировка по createdAt — на клиенте,
+  // поэтому составной индекс Firestore не нужен.
+  const userId = user?.uid;
+
+  useEffect(() => {
+    if (!userId) {
+      setOrders([]);
+      return;
+    }
+
+    const unsubscribe = onSnapshot(
+      query(
+        collection(db, "orders"),
+        where("userId", "==", userId)
+      ),
+      (snapshot) => {
+        const data: Order[] =
+          snapshot.docs.map((item) => ({
+            id: item.id,
+            ...(item.data() as Omit<
+              Order,
+              "id"
+            >),
+          }));
+
+        data.sort((a, b) => {
+          const aTime =
+            a.createdAt?.seconds || 0;
+          const bTime =
+            b.createdAt?.seconds || 0;
+
+          return bTime - aTime;
+        });
+
+        setOrders(data);
+      },
+      (error) => {
+        console.error(
+          "Orders subscription failed:",
+          error
+        );
+      }
+    );
+
+    return () => unsubscribe();
+  }, [userId]);
 
   const text = t[language];
 
@@ -853,42 +895,6 @@ export default function Home() {
     }
   }
 
-  async function loadOrders(
-    uid: string
-  ) {
-    try {
-      const q = query(
-        collection(db, "orders"),
-        where("userId", "==", uid)
-      );
-
-      const snapshot =
-        await getDocs(q);
-
-      const data: Order[] =
-        snapshot.docs.map((item) => ({
-          id: item.id,
-          ...(item.data() as Omit<
-            Order,
-            "id"
-          >),
-        }));
-
-      data.sort((a, b) => {
-        const aTime =
-          a.createdAt?.seconds || 0;
-        const bTime =
-          b.createdAt?.seconds || 0;
-
-        return bTime - aTime;
-      });
-
-      setOrders(data);
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
   function saveCart(
     updated: CartProduct[]
   ) {
@@ -1043,9 +1049,7 @@ export default function Home() {
     0
   );
 
-  const isStoreAdmin =
-    !!user?.email &&
-    ADMIN_EMAILS.includes(user.email.toLowerCase());
+  const isStoreAdmin = isAdminEmail(user?.email);
 
   function changeTab(
     newTab: Tab
@@ -1516,9 +1520,9 @@ export default function Home() {
             telegramUsername:
               telegramContext.user?.username || null,
 
-            status: "Новый",
+            status: INITIAL_ORDER_STATUS,
             paymentStatus:
-              "Чек ожидает проверки",
+              INITIAL_PAYMENT_STATUS,
 
             receiptUrl: "",
 
@@ -1563,6 +1567,9 @@ export default function Home() {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
+              // По токену сервер проверит владельца заказа и запишет
+              // проверенный Telegram ID клиента (из подписанного initData).
+              Authorization: `Bearer ${await currentUser.getIdToken()}`,
             },
             body: JSON.stringify({
               initData:
@@ -1614,10 +1621,7 @@ export default function Home() {
       setComment("");
       setReceiptFile(null);
 
-      await loadOrders(
-        currentUser.uid
-      );
-
+      // Историю заказов обновляет подписка onSnapshot.
       setSuccess(true);
     } catch (error) {
       console.error(error);

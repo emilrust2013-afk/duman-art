@@ -29,6 +29,12 @@ import {
 } from "firebase/storage";
 
 import { auth, db, storage } from "../firebase";
+import {
+  ADMIN_PAYMENT_BUTTONS,
+  INITIAL_ORDER_STATUS,
+  ORDER_STATUSES,
+  isAdminEmail,
+} from "../shopConfig";
 
 type Product = {
   id: string;
@@ -81,11 +87,6 @@ type Order = {
     seconds?: number;
   };
 };
-
-const ADMINS = [
-  "emil@dumanart.local",
-  "mama@dumanart.local",
-];
 
 const COLLECTIONS = [
   "Elvi",
@@ -184,6 +185,10 @@ export default function AdminPage() {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [openedOrderId, setOpenedOrderId] = useState<string | null>(null);
   const [statusSavingId, setStatusSavingId] = useState<string | null>(null);
+  const [statusNotice, setStatusNotice] = useState<{
+    orderId: string;
+    text: string;
+  } | null>(null);
 
   // =========================
   // SETTINGS
@@ -208,10 +213,7 @@ export default function AdminPage() {
     return () => unsubscribe();
   }, []);
 
-  const isAdmin = useMemo(() => {
-    const email = user?.email?.toLowerCase();
-    return !!email && ADMINS.includes(email);
-  }, [user]);
+  const isAdmin = useMemo(() => isAdminEmail(user?.email), [user]);
 
   // =========================
   // LOAD PRODUCTS
@@ -394,9 +396,7 @@ export default function AdminPage() {
         loginPassword
       );
 
-      const email = result.user.email?.toLowerCase();
-
-      if (!email || !ADMINS.includes(email)) {
+      if (!isAdminEmail(result.user.email)) {
         await signOut(auth);
         setLoginError("Нет доступа к админ-панели");
         return;
@@ -752,108 +752,76 @@ export default function AdminPage() {
   // ORDER STATUS
   // =========================
 
-  function getTelegramInitData() {
-    if (typeof window === "undefined") return "";
-
-    return String(
-      (window as any).Telegram?.WebApp?.initData || ""
-    );
-  }
-
-  async function changeOrderStatus(
+  // Статус меняет сервер (/api/admin/order-status): он проверяет права,
+  // обновляет заказ и отправляет клиенту сообщение в Telegram.
+  async function updateOrderStatus(
     orderId: string,
-    status: string
+    change: { status: string } | { paymentStatus: string }
   ) {
-    if (!isAdmin) return;
+    if (!isAdmin || !user) return;
 
-    const order = orders.find((item) => item.id === orderId);
+    // Показываем результат и вверху страницы, и прямо под кнопками заказа.
+    const notify = (text: string) => {
+      setMessage(text);
+      setStatusNotice({ orderId, text });
+    };
 
     try {
       setStatusSavingId(orderId);
+      setStatusNotice(null);
 
-      await updateDoc(
-        doc(db, "orders", orderId),
-        {
-          status,
-          statusUpdatedAt: serverTimestamp(),
-        }
-      );
+      const idToken = await user.getIdToken();
+
+      const response = await fetch("/api/admin/order-status", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify({ orderId, ...change }),
+      });
+
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok || !data?.ok) {
+        console.error("Order status update failed:", data);
+        notify(
+          `❌ Не удалось изменить статус${data?.error ? `: ${data.error}` : ""}`
+        );
+        return;
+      }
 
       setOrders((current) =>
         current.map((item) =>
-          item.id === orderId
-            ? { ...item, status }
-            : item
+          item.id === orderId ? { ...item, ...change } : item
         )
       );
 
-      // Отправляем клиенту сообщение прямо из Telegram Mini App.
-      if (order?.telegramUserId) {
-        const initData = getTelegramInitData();
-
-        if (initData) {
-          const response = await fetch("/api/telegram/status", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              initData,
-              telegramUserId: order.telegramUserId,
-              telegramUsername: order.telegramUsername || null,
-              orderId,
-              status,
-            }),
-          });
-
-          if (!response.ok) {
-            console.error(
-              "Telegram status notification failed:",
-              await response.text()
-            );
-            setMessage(
-              "Статус изменён, но сообщение клиенту не отправилось"
-            );
-            return;
-          }
-        }
+      if (data.changed === false) {
+        notify("Статус уже такой — ничего не изменено");
+      } else if (data.notified) {
+        notify("✅ Статус изменён, клиент уведомлён");
+      } else if (data.notifyError) {
+        notify(
+          `✅ Статус изменён. ⚠️ Клиенту сообщение не доставлено: ${data.notifyError}`
+        );
+      } else {
+        notify("✅ Статус изменён");
       }
     } catch (error) {
       console.error(error);
-      setMessage("Не удалось изменить статус");
+      notify("❌ Не удалось изменить статус");
     } finally {
       setStatusSavingId(null);
     }
   }
 
-  async function changePaymentStatus(
-    orderId: string,
-    paymentStatus: string
-  ) {
-    if (!isAdmin) return;
+  function changeOrderStatus(orderId: string, status: string) {
+    return updateOrderStatus(orderId, { status });
+  }
 
-    try {
-      await updateDoc(
-        doc(db, "orders", orderId),
-        {
-          paymentStatus,
-        }
-      );
-
-      setOrders((current) =>
-        current.map((order) =>
-          order.id === orderId
-            ? {
-                ...order,
-                paymentStatus,
-              }
-            : order
-        )
-      );
-    } catch (error) {
-      console.error(error);
-      setMessage("Не удалось изменить оплату");
-    }
+  function changePaymentStatus(orderId: string, paymentStatus: string) {
+    return updateOrderStatus(orderId, { paymentStatus });
   }
 
   async function deleteOrder(orderId: string) {
@@ -1531,7 +1499,7 @@ export default function AdminPage() {
                           <div className="text-right">
                             <span className="rounded-full bg-[#f1ece5] px-3 py-2 text-xs">
                               {order.status ||
-                                "Новый"}
+                                INITIAL_ORDER_STATUS}
                             </span>
 
                             <p className="mt-3 text-xs text-[#777066]">
@@ -1636,12 +1604,7 @@ export default function AdminPage() {
                             </p>
 
                             <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-                              {[
-                                "Новый",
-                                "Подтверждён",
-                                "В доставке",
-                                "Завершён",
-                              ].map((status) => (
+                              {ORDER_STATUSES.map((status) => (
                                 <button
                                   key={status}
                                   type="button"
@@ -1670,10 +1633,7 @@ export default function AdminPage() {
                             </p>
 
                             <div className="flex flex-wrap gap-2">
-                              {[
-                                "Не подтверждена",
-                                "Подтверждена",
-                              ].map((status) => (
+                              {ADMIN_PAYMENT_BUTTONS.map((status) => (
                                 <button
                                   key={status}
                                   type="button"
@@ -1683,7 +1643,8 @@ export default function AdminPage() {
                                       status
                                     )
                                   }
-                                  className={`rounded-full px-4 py-3 text-xs ${
+                                  disabled={statusSavingId === order.id}
+                                  className={`rounded-full px-4 py-3 text-xs transition disabled:cursor-wait disabled:opacity-60 ${
                                     order.paymentStatus ===
                                     status
                                       ? "bg-[#171717] text-white"
@@ -1694,7 +1655,17 @@ export default function AdminPage() {
                                 </button>
                               ))}
                             </div>
+
+                            <p className="mt-2 text-xs text-[#777066]">
+                              Сейчас: {order.paymentStatus || "—"}
+                            </p>
                           </div>
+
+                          {statusNotice?.orderId === order.id && (
+                            <p className="mt-4 rounded-2xl bg-[#faf8f5] px-4 py-3 text-sm">
+                              {statusNotice.text}
+                            </p>
+                          )}
 
                           {order.receiptUrl && (
                             <a
