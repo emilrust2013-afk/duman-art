@@ -7,7 +7,11 @@ import {
   getAdminDb,
   verifyRequestIdToken,
 } from "../../../firebaseAdmin";
-import { formatOrderNumber } from "../../../shopConfig";
+import {
+  deliveryLine,
+  formatOrderNumber,
+  formatUzPhone,
+} from "../../../shopConfig";
 import {
   escapeHtml,
   getAdminChatIds,
@@ -60,11 +64,12 @@ function buildAdminMessage(orderId: string, order: OrderData) {
     `🛍 <b>НОВЫЙ ЗАКАЗ</b>\n\n` +
     `📦 Заказ: <b>${formatOrderNumber(orderId)}</b>\n` +
     `👤 Клиент: <b>${escapeHtml(customer.name)}</b>\n` +
-    `📱 Телефон: <b>${escapeHtml(customer.phone)}</b>\n` +
+    `📱 Телефон: <b>${escapeHtml(formatUzPhone(customer.phone))}</b>\n` +
     `📍 Адрес: <b>${escapeHtml(customer.address)}</b>\n` +
     `${telegramLine}\n\n` +
     `🛒 <b>Товары:</b>\n${itemLines}\n\n` +
     `💰 <b>Итого: ${formatSum(order.total)}</b>\n` +
+    (deliveryLine(order.deliveryPrice) ? `${deliveryLine(order.deliveryPrice)}\n` : "") +
     `💳 Оплата: перевод на карту, чек приложен\n` +
     `📝 Комментарий: ${escapeHtml(customer.comment || "—")}`
   );

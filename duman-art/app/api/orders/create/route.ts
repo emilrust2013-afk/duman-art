@@ -5,6 +5,10 @@ import { getAdminDb, verifyRequestIdToken } from "../../../firebaseAdmin";
 import {
   INITIAL_ORDER_STATUS,
   INITIAL_PAYMENT_STATUS,
+  PHONE_FORMAT_ERROR,
+  formatUzPhone,
+  isFreeDelivery,
+  normalizeUzPhone,
 } from "../../../shopConfig";
 import { validateTelegramInitData } from "../../../telegramServer";
 
@@ -75,6 +79,15 @@ export async function POST(request: Request) {
     if (!customer.name || !customer.phone || !customer.address) {
       return badRequest("Заполните имя, телефон и адрес");
     }
+
+    // Телефон в едином виде +998 XX XXX XX XX.
+    const normalizedPhone = normalizeUzPhone(customer.phone);
+
+    if (!normalizedPhone) {
+      return badRequest(PHONE_FORMAT_ERROR.ru);
+    }
+
+    customer.phone = formatUzPhone(normalizedPhone);
 
     const rawItems = Array.isArray(body.items) ? (body.items as RequestItem[]) : [];
 
@@ -155,12 +168,20 @@ export async function POST(request: Request) {
       "orders/create"
     );
 
+    // Доставка: бесплатная по Ташкенту, если в settings/shop не выключено.
+    // deliveryPrice: 0 — бесплатно, null — стоимость уточнит менеджер.
+    // total при этом не меняется.
+    const settingsSnapshot = await db.collection("settings").doc("shop").get();
+    const freeDelivery = isFreeDelivery(settingsSnapshot.data());
+
     const orderRef = await db.collection("orders").add({
       userId: user.uid,
       customer,
+      phoneNormalized: normalizedPhone,
       items,
       total,
       totalItems,
+      deliveryPrice: freeDelivery ? 0 : null,
 
       telegramUserId: telegramUser?.id ?? null,
       telegramUsername: telegramUser?.username ?? null,

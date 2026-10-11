@@ -34,6 +34,15 @@ import {
 
 import { auth, db, storage } from "./firebase";
 import HomeCatalog from "./HomeCatalog";
+import {
+  DELIVERY_TEXTS,
+  PHONE_FORMAT_ERROR,
+  formatLocalPhoneInput,
+  formatUzPhone,
+  isFreeDelivery,
+  normalizeUzPhone,
+  toLocalPhoneDigits,
+} from "./shopConfig";
 
 type Language = "ru" | "uz";
 
@@ -277,9 +286,49 @@ const t = {
   },
 };
 
-function createAuthEmail(phone: string) {
-  const digits = phone.replace(/\D/g, "");
-  return `${digits}@dumanart.local`;
+// Email аккаунта строится из нормализованного номера: 998XXXXXXXXX@dumanart.local.
+// normalizedPhone — результат normalizeUzPhone.
+function createAuthEmail(normalizedPhone: string) {
+  return `${normalizedPhone}@dumanart.local`;
+}
+
+// Поле телефона с фиксированным префиксом +998: в value — 9 местных цифр,
+// отображаются как XX XXX XX XX. Вставка «+998 90 ...» тоже работает.
+function UzPhoneInput({
+  value,
+  onChange,
+  placeholder,
+  className,
+}: {
+  value: string;
+  onChange: (localDigits: string) => void;
+  placeholder: string;
+  className: string;
+}) {
+  return (
+    <div className="relative">
+      <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[#81796f]">
+        +998
+      </span>
+      <input
+        value={formatLocalPhoneInput(value)}
+        onChange={(e) =>
+          onChange(toLocalPhoneDigits(e.target.value))
+        }
+        placeholder={placeholder}
+        type="tel"
+        inputMode="numeric"
+        autoComplete="tel"
+        className={`${className} pl-[4.25rem]`}
+      />
+    </div>
+  );
+}
+
+// Старый формат (до нормализации): цифры как ввели — только для входа
+// тестовых аккаунтов, созданных раньше.
+function createLegacyAuthEmail(rawPhone: string) {
+  return `${rawPhone.replace(/\D/g, "")}@dumanart.local`;
 }
 
 function formatCardNumber(value: string) {
@@ -321,6 +370,12 @@ export default function Home() {
     useState<File | null>(null);
 
   const [cardNumber, setCardNumber] =
+    useState("");
+
+  // Доставка из settings/shop (по умолчанию бесплатная).
+  const [freeDelivery, setFreeDelivery] =
+    useState(true);
+  const [deliveryText, setDeliveryText] =
     useState("");
 
   const [user, setUser] =
@@ -588,8 +643,14 @@ export default function Home() {
       );
 
       if (snapshot.exists()) {
+        const data = snapshot.data();
+
         setCardNumber(
-          snapshot.data().cardNumber || ""
+          data.cardNumber || ""
+        );
+        setFreeDelivery(isFreeDelivery(data));
+        setDeliveryText(
+          String(data.deliveryText || "").trim()
         );
       }
     } catch (error) {
@@ -858,11 +919,12 @@ export default function Home() {
         snapshot.data() as UserProfile;
 
       setName(data.name || "");
-      setPhone(data.phone || "");
+      // В полях телефона храним 9 местных цифр, +998 показывается отдельно.
+      setPhone(toLocalPhoneDigits(data.phone));
       setPasswordChangedOnce(data.passwordChangedOnce === true);
 
       setEditName(data.name || "");
-      setEditPhone(data.phone || "");
+      setEditPhone(toLocalPhoneDigits(data.phone));
       setEditAddress(data.address || "");
 
       const loadedAddresses = Array.isArray(data.addresses)
@@ -1080,14 +1142,50 @@ export default function Home() {
       return;
     }
 
+    const normalizedLoginPhone =
+      normalizeUzPhone(loginPhone);
+
+    if (!normalizedLoginPhone) {
+      setLoginMessage(PHONE_FORMAT_ERROR[language]);
+      return;
+    }
+
     try {
       setLoginMessage("");
 
-      await signInWithEmailAndPassword(
-        auth,
-        createAuthEmail(loginPhone),
-        loginPassword
-      );
+      try {
+        await signInWithEmailAndPassword(
+          auth,
+          createAuthEmail(normalizedLoginPhone),
+          loginPassword
+        );
+      } catch (error) {
+        // Аккаунт мог быть создан до нормализации номера (только цифры,
+        // как ввели) — пробуем старый формат email.
+        const legacyEmail =
+          createLegacyAuthEmail(loginPhone);
+        const notFound = [
+          "auth/invalid-credential",
+          "auth/user-not-found",
+          "auth/invalid-email",
+        ].includes(
+          String((error as { code?: string })?.code)
+        );
+
+        if (
+          !notFound ||
+          legacyEmail ===
+            createAuthEmail(normalizedLoginPhone)
+        ) {
+          throw error;
+        }
+
+        await signInWithEmailAndPassword(
+          auth,
+          legacyEmail,
+          loginPassword
+        );
+      }
 
       setLoginPhone("");
       setLoginPassword("");
@@ -1192,6 +1290,14 @@ export default function Home() {
       return;
     }
 
+    const normalizedEditPhone =
+      normalizeUzPhone(editPhone);
+
+    if (!normalizedEditPhone) {
+      setSaveMessage(PHONE_FORMAT_ERROR[language]);
+      return;
+    }
+
     try {
       const selectedSavedAddress =
         savedAddresses.find(
@@ -1202,7 +1308,7 @@ export default function Home() {
 
       const profileData: Record<string, any> = {
         name: editName.trim(),
-        phone: editPhone.trim(),
+        phone: formatUzPhone(normalizedEditPhone),
         updatedAt: serverTimestamp(),
       };
 
@@ -1221,7 +1327,7 @@ export default function Home() {
       );
 
       setName(editName.trim());
-      setPhone(editPhone.trim());
+      setPhone(toLocalPhoneDigits(normalizedEditPhone));
       setAddress(selectedSavedAddress);
 
       setSaveMessage(text.saveData);
@@ -1474,6 +1580,17 @@ export default function Home() {
       return;
     }
 
+    const normalizedPhone =
+      normalizeUzPhone(phone);
+
+    if (!normalizedPhone) {
+      alert(PHONE_FORMAT_ERROR[language]);
+      return;
+    }
+
+    const displayPhone =
+      formatUzPhone(normalizedPhone);
+
     if (!address.trim()) {
       alert(text.address);
       return;
@@ -1514,7 +1631,7 @@ export default function Home() {
       setOrdering(true);
 
       const email =
-        createAuthEmail(phone);
+        createAuthEmail(normalizedPhone);
 
       let currentUser =
         auth.currentUser;
@@ -1567,7 +1684,7 @@ export default function Home() {
           userRef,
           {
             name: name.trim(),
-            phone: phone.trim(),
+            phone: displayPhone,
             address:
               address.trim(),
           }
@@ -1582,7 +1699,7 @@ export default function Home() {
           userRef,
           {
             name: name.trim(),
-            phone: phone.trim(),
+            phone: displayPhone,
             address:
               address.trim(),
             createdAt:
@@ -1608,7 +1725,7 @@ export default function Home() {
             })),
             customer: {
               name: name.trim(),
-              phone: phone.trim(),
+              phone: displayPhone,
               address: address.trim(),
               comment: comment.trim(),
             },
@@ -1995,7 +2112,15 @@ export default function Home() {
             </h1>
 
             <div className="mt-6">
-              <HomeCatalog language={language} />
+              <HomeCatalog
+                language={language}
+                deliveryNote={
+                  freeDelivery
+                    ? deliveryText ||
+                      DELIVERY_TEXTS[language].cardNote
+                    : DELIVERY_TEXTS[language].byManager
+                }
+              />
             </div>
 
           </section>
@@ -2335,6 +2460,24 @@ export default function Home() {
 
                   </div>
 
+                  <div className="mt-2 flex justify-between gap-4 text-sm text-[#777066]">
+                    <span>
+                      {DELIVERY_TEXTS[language].label}
+                    </span>
+
+                    <span
+                      className={
+                        freeDelivery
+                          ? "font-medium text-[#3f7d4e]"
+                          : "text-right"
+                      }
+                    >
+                      {freeDelivery
+                        ? DELIVERY_TEXTS[language].free
+                        : DELIVERY_TEXTS[language].byManager}
+                    </span>
+                  </div>
+
                 </div>
 
                 <div className="mt-5 rounded-[24px] bg-white p-5 shadow-sm">
@@ -2382,19 +2525,10 @@ export default function Home() {
                       </button>
                     </div>
 
-                    <input
+                    <UzPhoneInput
                       value={phone}
-                      onChange={(e) =>
-                        setPhone(
-                          e.target.value.replace(
-                            /\D/g,
-                            ""
-                          )
-                        )
-                      }
-                      placeholder={`${text.phone} *`}
-                      type="text"
-                      inputMode="numeric"
+                      onChange={setPhone}
+                      placeholder="XX XXX XX XX *"
                       className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none"
                     />
 
@@ -2578,13 +2712,10 @@ export default function Home() {
                 </div>
 
                 <div className="mt-5 space-y-3">
-                  <input
+                  <UzPhoneInput
                     value={loginPhone}
-                    onChange={(e) =>
-                      setLoginPhone(e.target.value.replace(/\D/g, ""))
-                    }
-                    placeholder={text.phone}
-                    inputMode="numeric"
+                    onChange={setLoginPhone}
+                    placeholder="XX XXX XX XX"
                     className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
                   />
 
@@ -2647,13 +2778,10 @@ export default function Home() {
                           placeholder={text.name}
                           className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
                         />
-                        <input
+                        <UzPhoneInput
                           value={editPhone}
-                          onChange={(e) =>
-                            setEditPhone(e.target.value.replace(/\D/g, ""))
-                          }
-                          placeholder={text.phone}
-                          inputMode="numeric"
+                          onChange={setEditPhone}
+                          placeholder="XX XXX XX XX"
                           className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
                         />
                         <button

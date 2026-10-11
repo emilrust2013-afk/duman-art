@@ -6,6 +6,102 @@
 
 export const SHOP_PHONE = "+998 87 907 01 07";
 
+// =========================
+// ТЕЛЕФОН (Узбекистан)
+// =========================
+
+export const PHONE_FORMAT_ERROR = {
+  ru: "Введите номер в формате +998 XX XXX XX XX",
+  uz: "Raqamni +998 XX XXX XX XX formatida kiriting",
+};
+
+// Приводит номер к виду 998XXXXXXXXX. 9 цифр — добавляет 998.
+// Возвращает null, если номер не узбекский / неполный.
+export function normalizeUzPhone(value: unknown): string | null {
+  const digits = String(value ?? "").replace(/\D/g, "");
+
+  if (digits.length === 9) {
+    return `998${digits}`;
+  }
+
+  if (digits.length === 12 && digits.startsWith("998")) {
+    return digits;
+  }
+
+  return null;
+}
+
+// +998 XX XXX XX XX. Если номер не распознан — возвращает как есть.
+export function formatUzPhone(value: unknown): string {
+  const normalized = normalizeUzPhone(value);
+
+  if (!normalized) {
+    return String(value ?? "");
+  }
+
+  const local = normalized.slice(3);
+
+  return `+998 ${local.slice(0, 2)} ${local.slice(2, 5)} ${local.slice(5, 7)} ${local.slice(7, 9)}`;
+}
+
+// Для поля ввода: хранит только 9 «местных» цифр (без 998).
+// Вставленный номер +998... обрезается до местной части.
+export function toLocalPhoneDigits(value: unknown): string {
+  let digits = String(value ?? "").replace(/\D/g, "");
+
+  if (digits.length > 9 && digits.startsWith("998")) {
+    digits = digits.slice(3);
+  }
+
+  return digits.slice(0, 9);
+}
+
+// Отображение местных цифр в поле: XX XXX XX XX (по мере ввода).
+export function formatLocalPhoneInput(local: string): string {
+  const digits = local.replace(/\D/g, "").slice(0, 9);
+
+  return [digits.slice(0, 2), digits.slice(2, 5), digits.slice(5, 7), digits.slice(7, 9)]
+    .filter(Boolean)
+    .join(" ");
+}
+
+// =========================
+// ДОСТАВКА
+// =========================
+
+// Настройки доставки хранятся в settings/shop: freeDelivery, deliveryText.
+// По умолчанию доставка бесплатная.
+export function isFreeDelivery(settings: { freeDelivery?: unknown } | undefined) {
+  return settings?.freeDelivery !== false;
+}
+
+export const DELIVERY_TEXTS = {
+  ru: {
+    label: "Доставка",
+    free: "Бесплатно",
+    byManager: "Стоимость доставки уточнит менеджер",
+    cardNote: "Бесплатная доставка по Ташкенту",
+  },
+  uz: {
+    label: "Yetkazib berish",
+    free: "Bepul",
+    byManager: "Yetkazib berish narxini menejer aniqlaydi",
+    cardNote: "Toshkent bo‘ylab bepul yetkazib berish",
+  },
+};
+
+// Строка для уведомлений в Telegram по полю заказа deliveryPrice.
+// undefined — старый заказ без сведений о доставке.
+export function deliveryLine(deliveryPrice: unknown): string | null {
+  if (deliveryPrice === undefined) {
+    return null;
+  }
+
+  return deliveryPrice === 0
+    ? "🚚 Доставка: бесплатно"
+    : "🚚 Доставка: стоимость уточнит менеджер";
+}
+
 // Статусы заказа, которые может выставить администратор.
 // Старые значения в базе (например, «В обработке») продолжают
 // отображаться как есть, но выставить их через админку нельзя.
@@ -54,17 +150,20 @@ export function buildStatusNotification(
   field: "status" | "paymentStatus",
   value: string,
   orderId: string,
-  total: number
+  total: number,
+  deliveryPrice?: unknown
 ): string | null {
   const number = formatOrderNumber(orderId);
   const sum = `💰 Сумма: <b>${new Intl.NumberFormat("ru-RU").format(total)} сум</b>`;
+  const delivery = deliveryLine(deliveryPrice);
 
   if (field === "status") {
     switch (value) {
       case "Подтверждён":
         return (
           `✅ <b>Заказ ${number} подтверждён</b>\n\n` +
-          `Мы уже готовим его к отправке.\n${sum}`
+          `Мы уже готовим его к отправке.\n${sum}` +
+          (delivery ? `\n${delivery}` : "")
         );
       case "В доставке":
         return (

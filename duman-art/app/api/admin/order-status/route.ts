@@ -207,7 +207,13 @@ export async function POST(request: Request) {
     const total = Number(order.total || 0);
     const texts = changes
       .map((change) =>
-        buildStatusNotification(change.field, change.to, orderId, total)
+        buildStatusNotification(
+          change.field,
+          change.to,
+          orderId,
+          total,
+          order.deliveryPrice
+        )
       )
       .filter((text): text is string => !!text);
 

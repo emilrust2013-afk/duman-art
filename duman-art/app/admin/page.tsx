@@ -20,6 +20,7 @@ import {
   orderBy,
   query,
   serverTimestamp,
+  setDoc,
   updateDoc,
 } from "firebase/firestore";
 import {
@@ -33,6 +34,8 @@ import {
   ADMIN_PAYMENT_BUTTONS,
   INITIAL_ORDER_STATUS,
   ORDER_STATUSES,
+  formatUzPhone,
+  isFreeDelivery,
 } from "../shopConfig";
 
 type Product = {
@@ -195,6 +198,8 @@ export default function AdminPage() {
   // =========================
 
   const [cardNumber, setCardNumber] = useState("");
+  const [freeDelivery, setFreeDelivery] = useState(true);
+  const [deliveryText, setDeliveryText] = useState("");
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
 
@@ -377,6 +382,8 @@ export default function AdminPage() {
       if (snapshot.exists()) {
         const data = snapshot.data();
         setCardNumber(data.cardNumber || "");
+        setFreeDelivery(isFreeDelivery(data));
+        setDeliveryText(data.deliveryText || "");
       }
     } catch (error) {
       console.error(error);
@@ -871,31 +878,22 @@ export default function AdminPage() {
     try {
       setSavingSettings(true);
 
-      await updateDoc(
+      // merge: создаёт settings/shop, если его нет, и не трогает другие поля.
+      await setDoc(
         doc(db, "settings", "shop"),
         {
           cardNumber: cardNumber.trim(),
+          freeDelivery,
+          deliveryText: deliveryText.trim(),
           updatedAt: serverTimestamp(),
-        }
+        },
+        { merge: true }
       );
 
-      setMessage("✅ Номер карты сохранён");
+      setMessage("✅ Настройки сохранены");
     } catch (error) {
       console.error(error);
-
-      // Если документа ещё нет
-      try {
-        await addDoc(collection(db, "settings"), {
-          cardNumber: cardNumber.trim(),
-        });
-
-        setMessage(
-          "✅ Настройки сохранены, но проверь документ settings"
-        );
-      } catch (fallbackError) {
-        console.error(fallbackError);
-        setMessage("Ошибка сохранения настроек");
-      }
+      setMessage("Ошибка сохранения настроек");
     } finally {
       setSavingSettings(false);
     }
@@ -1545,7 +1543,9 @@ export default function AdminPage() {
                               </p>
 
                               <p className="mt-1 font-medium">
-                                {order.phone || "—"}
+                                {order.phone
+                                  ? formatUzPhone(order.phone)
+                                  : "—"}
                               </p>
                             </div>
 
@@ -1723,12 +1723,12 @@ export default function AdminPage() {
               </p>
 
               <h2 className="mt-2 font-serif text-3xl">
-                Настройки оплаты
+                Оплата и доставка
               </h2>
 
               <p className="mt-2 text-sm text-[#777066]">
-                Здесь можно изменить карту, на которую
-                клиент переводит оплату.
+                Карта, на которую клиент переводит оплату,
+                и условия доставки.
               </p>
             </div>
 
@@ -1751,6 +1751,51 @@ export default function AdminPage() {
                   className="w-full rounded-2xl border border-[#ddd4c8] px-4 py-4 outline-none"
                 />
 
+                <div className="mt-6 rounded-2xl bg-[#faf8f5] p-4">
+                  <label className="flex cursor-pointer items-center justify-between gap-4">
+                    <span>
+                      <span className="block text-sm font-medium">
+                        🚚 Бесплатная доставка
+                      </span>
+                      <span className="mt-1 block text-xs text-[#777066]">
+                        {freeDelivery
+                          ? "Клиенты видят «Доставка: Бесплатно»"
+                          : "Клиенты видят «Стоимость доставки уточнит менеджер»"}
+                      </span>
+                    </span>
+
+                    <input
+                      type="checkbox"
+                      checked={freeDelivery}
+                      onChange={(e) =>
+                        setFreeDelivery(e.target.checked)
+                      }
+                      className="h-6 w-6 shrink-0 accent-[#171717]"
+                    />
+                  </label>
+
+                  {freeDelivery && (
+                    <>
+                      <label className="mb-2 mt-4 block text-sm font-medium">
+                        Текст в карточке товара
+                      </label>
+
+                      <input
+                        value={deliveryText}
+                        onChange={(e) =>
+                          setDeliveryText(e.target.value)
+                        }
+                        placeholder="Бесплатная доставка по Ташкенту"
+                        className="w-full rounded-2xl border border-[#ddd4c8] bg-white px-4 py-3 outline-none"
+                      />
+
+                      <p className="mt-2 text-xs text-[#777066]">
+                        Пусто — стандартный текст на русском и узбекском.
+                      </p>
+                    </>
+                  )}
+                </div>
+
                 <button
                   type="button"
                   onClick={saveSettings}
@@ -1759,7 +1804,7 @@ export default function AdminPage() {
                 >
                   {savingSettings
                     ? "Сохраняем..."
-                    : "Сохранить карту"}
+                    : "Сохранить настройки"}
                 </button>
               </>
             )}

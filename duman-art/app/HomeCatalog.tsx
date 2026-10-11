@@ -31,6 +31,8 @@ type Product = {
 
 type Props = {
   language: Language;
+  // Строка о доставке под ценой в карточке товара (пусто — не показывать).
+  deliveryNote?: string;
 };
 
 function getName(product: Product, language: Language) {
@@ -183,7 +185,7 @@ function IconChevron({ direction }: { direction: "left" | "right" }) {
   );
 }
 
-export default function HomeCatalog({ language }: Props) {
+export default function HomeCatalog({ language, deliveryNote }: Props) {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [queryText, setQueryText] = useState("");
@@ -965,6 +967,12 @@ export default function HomeCatalog({ language }: Props) {
                 </p>
                 <span className={`text-xs ${page.subtext}`}>сум</span>
               </div>
+
+              {deliveryNote && (
+                <p className={`mt-1.5 text-xs ${page.subtext}`}>
+                  🚚 {deliveryNote}
+                </p>
+              )}
 
               {getDescription(selectedProduct, language) && (
                 <p className={`mt-4 text-sm leading-6 ${page.subtext}`}>
