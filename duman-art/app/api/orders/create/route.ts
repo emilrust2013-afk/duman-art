@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldValue, type Firestore } from "firebase-admin/firestore";
 
 import { getAdminDb, verifyRequestIdToken } from "../../../firebaseAdmin";
 import {
@@ -31,6 +31,18 @@ type RequestBody = {
     comment?: unknown;
   };
   initData?: unknown;
+  // Профиль, который клиент хранил локально до первого заказа.
+  profile?: {
+    addresses?: unknown;
+    passwordChangedOnce?: unknown;
+  };
+};
+
+type Customer = {
+  name: string;
+  phone: string;
+  address: string;
+  comment: string;
 };
 
 const MAX_ITEMS = 50;
@@ -40,8 +52,63 @@ function cleanText(value: unknown, maxLength: number) {
   return typeof value === "string" ? value.trim().slice(0, maxLength) : "";
 }
 
-function badRequest(error: string, status = 400) {
-  return NextResponse.json({ ok: false, error }, { status });
+// code — машиночитаемая причина: клиент по ней показывает понятный текст
+// на русском или узбекском.
+function badRequest(error: string, code: string, status = 400) {
+  return NextResponse.json({ ok: false, error, code }, { status });
+}
+
+const MAX_ADDRESSES = 20;
+
+function cleanAddresses(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .slice(0, MAX_ADDRESSES)
+    .map((item, index) => ({
+      id: cleanText(item?.id, 60) || `address-${index}`,
+      label: cleanText(item?.label, 60) || `Адрес ${index + 1}`,
+      address: cleanText(item?.address, 300),
+    }))
+    .filter((item) => item.address);
+}
+
+// Документ users/{uid} появляется только с первым заказом: до этого профиль
+// и адреса клиент хранит у себя (localStorage) и присылает их сюда.
+// Возвращает true, если профиль создан этим заказом.
+async function saveCustomerProfile(
+  db: Firestore,
+  uid: string,
+  customer: Customer,
+  profile: RequestBody["profile"]
+) {
+  const userRef = db.collection("users").doc(uid);
+
+  return db.runTransaction(async (transaction) => {
+    const snapshot = await transaction.get(userRef);
+    const contact = {
+      name: customer.name,
+      phone: customer.phone,
+      address: customer.address,
+      updatedAt: FieldValue.serverTimestamp(),
+    };
+
+    if (snapshot.exists) {
+      transaction.update(userRef, contact);
+      return false;
+    }
+
+    transaction.set(userRef, {
+      ...contact,
+      addresses: cleanAddresses(profile?.addresses),
+      passwordChangedOnce: profile?.passwordChangedOnce === true,
+      createdAt: FieldValue.serverTimestamp(),
+    });
+
+    return true;
+  });
 }
 
 // Вариант (размер/цвет) сохраняем, только если он есть у товара.
@@ -58,7 +125,7 @@ export async function POST(request: Request) {
     const user = await verifyRequestIdToken(request);
 
     if (!user) {
-      return badRequest("Требуется вход", 401);
+      return badRequest("Требуется вход", "auth-required", 401);
     }
 
     let body: RequestBody;
@@ -66,10 +133,10 @@ export async function POST(request: Request) {
     try {
       body = (await request.json()) as RequestBody;
     } catch {
-      return badRequest("Некорректный запрос");
+      return badRequest("Некорректный запрос", "bad-request");
     }
 
-    const customer = {
+    const customer: Customer = {
       name: cleanText(body.customer?.name, 100),
       phone: cleanText(body.customer?.phone, 30),
       address: cleanText(body.customer?.address, 300),
@@ -77,14 +144,14 @@ export async function POST(request: Request) {
     };
 
     if (!customer.name || !customer.phone || !customer.address) {
-      return badRequest("Заполните имя, телефон и адрес");
+      return badRequest("Заполните имя, телефон и адрес", "missing-fields");
     }
 
     // Телефон в едином виде +998 XX XXX XX XX.
     const normalizedPhone = normalizeUzPhone(customer.phone);
 
     if (!normalizedPhone) {
-      return badRequest(PHONE_FORMAT_ERROR.ru);
+      return badRequest(PHONE_FORMAT_ERROR.ru, "invalid-phone");
     }
 
     customer.phone = formatUzPhone(normalizedPhone);
@@ -92,7 +159,7 @@ export async function POST(request: Request) {
     const rawItems = Array.isArray(body.items) ? (body.items as RequestItem[]) : [];
 
     if (rawItems.length === 0 || rawItems.length > MAX_ITEMS) {
-      return badRequest("Корзина пуста или слишком большая");
+      return badRequest("Корзина пуста или слишком большая", "invalid-cart");
     }
 
     const requested = [];
@@ -109,7 +176,7 @@ export async function POST(request: Request) {
         quantity < 1 ||
         quantity > MAX_QUANTITY
       ) {
-        return badRequest("Некорректный товар в корзине");
+        return badRequest("Некорректный товар в корзине", "invalid-item");
       }
 
       requested.push({ productId, quantity, size: item.size, color: item.color });
@@ -132,12 +199,17 @@ export async function POST(request: Request) {
       );
 
       if (!snapshot.exists || !product) {
-        return badRequest("Один из товаров больше не продаётся", 409);
+        return badRequest("Один из товаров больше не продаётся", "product-unavailable", 409);
       }
 
       if (product.available === false || !Number.isFinite(price) || price <= 0) {
         return NextResponse.json(
-          { ok: false, error: `Товар «${name}» сейчас недоступен`, productId: snapshot.id },
+          {
+            ok: false,
+            error: `Товар «${name}» сейчас недоступен`,
+            code: "product-unavailable",
+            productId: snapshot.id,
+          },
           { status: 409 }
         );
       }
@@ -199,10 +271,24 @@ export async function POST(request: Request) {
       createdAt: FieldValue.serverTimestamp(),
     });
 
-    return NextResponse.json({ ok: true, orderId: orderRef.id, total });
+    // Профиль — после заказа: его ошибка не должна отменять уже созданный заказ.
+    let profileCreated = false;
+
+    try {
+      profileCreated = await saveCustomerProfile(db, user.uid, customer, body.profile);
+    } catch (error) {
+      console.error(`Order ${orderRef.id}: customer profile save failed:`, error);
+    }
+
+    return NextResponse.json({
+      ok: true,
+      orderId: orderRef.id,
+      total,
+      profileCreated,
+    });
   } catch (error) {
     console.error("Order creation failed:", error);
 
-    return badRequest("Не удалось оформить заказ", 500);
+    return badRequest("Не удалось оформить заказ", "server-error", 500);
   }
 }

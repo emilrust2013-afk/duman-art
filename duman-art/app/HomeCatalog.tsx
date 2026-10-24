@@ -1,8 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState, type TouchEvent } from "react";
-import { collection, getDocs } from "firebase/firestore";
+import { collection, getDocs, type DocumentData } from "firebase/firestore";
 import { db } from "./firebase";
+import { FAVORITE_COLOR } from "./shopConfig";
 
 type Language = "ru" | "uz";
 
@@ -61,7 +62,7 @@ function getDescription(product: Product, language: Language) {
   );
 }
 
-function normalizeProduct(id: string, data: Record<string, any>): Product {
+function normalizeProduct(id: string, data: DocumentData): Product {
   return {
     id,
     name: data.name || data.nameRu || data.nameUz || "Товар",
@@ -104,11 +105,21 @@ function formatPrice(value: number) {
   return new Intl.NumberFormat("ru-RU").format(value);
 }
 
-function IconHeart({ filled }: { filled: boolean }) {
+// Синее сердце: заполненное — товар в избранном, контур — нет.
+function IconHeart({
+  filled,
+  color,
+  className = "h-[19px] w-[19px]",
+}: {
+  filled: boolean;
+  color: string;
+  className?: string;
+}) {
   return (
     <svg
       viewBox="0 0 24 24"
-      className="h-[19px] w-[19px]"
+      className={className}
+      style={{ color }}
       fill={filled ? "currentColor" : "none"}
       stroke="currentColor"
       strokeWidth="1.7"
@@ -261,7 +272,7 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
         setCart(
           Array.isArray(savedCart)
             ? savedCart
-                .map((item: any) => ({
+                .map((item: { productId?: unknown; id?: unknown; quantity?: unknown } | null) => ({
                   productId: String(
                     item?.productId || item?.id || ""
                   ),
@@ -469,6 +480,8 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
       goToImage(selectedImage - 1);
     }
   }
+
+  const favoriteColor = isDark ? FAVORITE_COLOR.dark : FAVORITE_COLOR.light;
 
   const page = {
     bg: isDark ? "bg-[#151311]" : "bg-[#f4f0e9]",
@@ -720,12 +733,10 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
                     }
                     onClick={() => toggleFavorite(product.id)}
                     className={`absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-full shadow-sm backdrop-blur transition active:scale-90 ${
-                      isDark
-                        ? "bg-[#211f1d]/92 text-[#f4f0e9]"
-                        : "bg-white/95 text-[#4f4942]"
+                      isDark ? "bg-[#211f1d]/92" : "bg-white/95"
                     }`}
                   >
-                    <IconHeart filled={favorite} />
+                    <IconHeart filled={favorite} color={favoriteColor} />
                   </button>
                 </div>
 
@@ -1037,15 +1048,20 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
                 <button
                   type="button"
                   onClick={() => toggleFavorite(selectedProduct.id)}
-                  className={`rounded-full border ${page.border} py-3.5 text-sm font-medium transition active:scale-[0.98] ${page.ghostButton}`}
+                  className={`flex items-center justify-center gap-2 rounded-full border ${page.border} py-3.5 text-sm font-medium transition active:scale-[0.98] ${page.ghostButton}`}
                 >
+                  <IconHeart
+                    filled={favorites.includes(selectedProduct.id)}
+                    color={favoriteColor}
+                    className="h-[17px] w-[17px]"
+                  />
                   {favorites.includes(selectedProduct.id)
                     ? ru
-                      ? "♥ В избранном"
-                      : "♥ Sevimlilarda"
+                      ? "В избранном"
+                      : "Sevimlilarda"
                     : ru
-                    ? "♡ В избранное"
-                    : "♡ Sevimlilarga"}
+                    ? "В избранное"
+                    : "Sevimlilarga"}
                 </button>
 
                 <button

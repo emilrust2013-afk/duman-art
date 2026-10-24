@@ -17,6 +17,10 @@ const app = initializeApp(firebaseConfig);
 
 export const db = getFirestore(app);
 export const storage = getStorage(app);
+
+// По умолчанию Storage повторяет загрузку до 10 минут — при плохой сети
+// оформление заказа «висело» бы. Минуты хватает, дальше покажем ошибку.
+storage.maxUploadRetryTime = 60_000;
 export const auth = getAuth(app);
 
 export default app;

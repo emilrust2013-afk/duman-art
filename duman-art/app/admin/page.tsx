@@ -283,6 +283,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (isAdmin && activeSection === "products") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- загрузка товаров при открытии раздела
       loadProducts();
     }
   }, [isAdmin, activeSection]);
@@ -305,7 +306,7 @@ export default function AdminPage() {
       const snapshot = await getDocs(q);
 
       const list: Order[] = snapshot.docs.map((item) => {
-        const data = item.data() as any;
+        const data = item.data();
         const customer = data.customer || {};
 
         return {
@@ -329,8 +330,8 @@ export default function AdminPage() {
         const snapshot = await getDocs(collection(db, "orders"));
 
         const list: Order[] = snapshot.docs
-          .map((item) => {
-            const data = item.data() as any;
+          .map((item): Order => {
+            const data = item.data();
             const customer = data.customer || {};
 
             return {
@@ -363,6 +364,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (isAdmin && activeSection === "orders") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- загрузка заказов при открытии раздела
       loadOrders();
     }
   }, [isAdmin, activeSection]);
@@ -395,6 +397,7 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (isAdmin && activeSection === "settings") {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- загрузка настроек при открытии раздела
       loadSettings();
     }
   }, [isAdmin, activeSection]);
@@ -1045,8 +1048,8 @@ export default function AdminPage() {
         strategy="afterInteractive"
         onLoad={() => {
           try {
-            (window as any).Telegram?.WebApp?.ready?.();
-            (window as any).Telegram?.WebApp?.expand?.();
+            window.Telegram?.WebApp?.ready?.();
+            window.Telegram?.WebApp?.expand?.();
           } catch {}
         }}
       />

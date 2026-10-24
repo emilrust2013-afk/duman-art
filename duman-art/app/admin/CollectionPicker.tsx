@@ -73,6 +73,7 @@ export default function CollectionPicker({ value, onChange }: Props) {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- загрузка коллекций из Firestore при открытии
     loadCollections();
   }, []);
 

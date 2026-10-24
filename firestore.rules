@@ -28,10 +28,13 @@ service cloud.firestore {
     }
 
     // Профиль клиента (имя, телефон, адреса): владелец; админы — только чтение.
+    // Документ создаёт сервер при первом заказе (/api/orders/create),
+    // до этого профиль хранится у клиента в localStorage. Клиент может
+    // только обновлять уже созданный профиль.
     match /users/{userId} {
       allow read: if isSignedIn()
         && (request.auth.uid == userId || isAdmin());
-      allow create, update: if isSignedIn()
+      allow update: if isSignedIn()
         && request.auth.uid == userId;
     }
 

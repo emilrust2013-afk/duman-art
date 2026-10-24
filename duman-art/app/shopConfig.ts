@@ -65,6 +65,13 @@ export function formatLocalPhoneInput(local: string): string {
     .join(" ");
 }
 
+// Цвет сердечек «Избранное»: фирменный синий; в тёмной теме — светлее,
+// чтобы читался на тёмном фоне.
+export const FAVORITE_COLOR = {
+  light: "#1E4FA8",
+  dark: "#6E9BEF",
+};
+
 // =========================
 // ДОСТАВКА
 // =========================

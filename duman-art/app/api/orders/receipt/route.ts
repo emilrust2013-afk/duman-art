@@ -102,35 +102,38 @@ async function notifyAdmins(orderId: string, order: OrderData) {
         }
       : undefined;
 
-  let delivered = 0;
+  // Админам отправляем параллельно: клиент ждёт ответа этого маршрута,
+  // и последовательная отправка нескольким админам заметно его задерживала.
+  const results = await Promise.all(
+    chatIds.map(async (chatId) => {
+      try {
+        await telegramRequest("sendMessage", {
+          chat_id: chatId,
+          text,
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+          ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
+        });
+      } catch (error) {
+        console.error(`Order ${orderId}: admin message failed:`, error);
+        return false;
+      }
 
-  for (const chatId of chatIds) {
-    try {
-      await telegramRequest("sendMessage", {
-        chat_id: chatId,
-        text,
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-        ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
-      });
-      delivered++;
-    } catch (error) {
-      console.error(`Order ${orderId}: admin message failed:`, error);
-      continue;
-    }
+      try {
+        await telegramRequest("sendPhoto", {
+          chat_id: chatId,
+          photo: order.receiptUrl,
+          caption: `🧾 Чек к заказу ${formatOrderNumber(orderId)}`,
+        });
+      } catch (error) {
+        console.error(`Order ${orderId}: receipt photo failed:`, error);
+      }
 
-    try {
-      await telegramRequest("sendPhoto", {
-        chat_id: chatId,
-        photo: order.receiptUrl,
-        caption: `🧾 Чек к заказу ${formatOrderNumber(orderId)}`,
-      });
-    } catch (error) {
-      console.error(`Order ${orderId}: receipt photo failed:`, error);
-    }
-  }
+      return true;
+    })
+  );
 
-  return delivered > 0;
+  return results.includes(true);
 }
 
 export async function POST(request: Request) {

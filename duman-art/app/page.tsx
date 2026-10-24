@@ -12,7 +12,7 @@ import {
   query,
   serverTimestamp,
   setDoc,
-  updateDoc,
+  type Timestamp,
   where,
 } from "firebase/firestore";
 
@@ -25,6 +25,7 @@ import {
   signOut,
   type User,
   updatePassword,
+  updateProfile,
 } from "firebase/auth";
 
 import {
@@ -36,8 +37,10 @@ import { auth, db, storage } from "./firebase";
 import HomeCatalog from "./HomeCatalog";
 import {
   DELIVERY_TEXTS,
+  FAVORITE_COLOR,
   PHONE_FORMAT_ERROR,
   formatLocalPhoneInput,
+  formatOrderNumber,
   formatUzPhone,
   isFreeDelivery,
   normalizeUzPhone,
@@ -67,6 +70,11 @@ type CartProduct = {
   quantity: number;
 };
 
+// Элемент корзины из localStorage: полный формат или { productId, quantity }.
+type StoredCartItem = Partial<CartProduct> & {
+  productId?: string;
+};
+
 type SavedAddress = {
   id: string;
   label: string;
@@ -88,7 +96,7 @@ type Order = {
   status: string;
   paymentStatus: string;
   receiptUrl?: string;
-  createdAt?: any;
+  createdAt?: Timestamp | null;
   items?: {
     name: string;
     price: number;
@@ -129,6 +137,21 @@ const t = {
     checkout: "Оформление заказа",
     allRequired:
       "Имя, пароль, телефон и адрес обязательны. Комментарий необязателен.",
+    allRequiredLoggedIn:
+      "Имя, телефон и адрес обязательны, комментарий — по желанию.",
+    loggedInAs: "Вы вошли как",
+    newCustomer: "Я новый покупатель",
+    haveAccount: "У меня есть аккаунт",
+    checkoutRegisterHint:
+      "Придумайте пароль — с ним вы будете входить и смотреть свои заказы.",
+    checkoutLoginHint:
+      "Войдите по номеру и паролю — имя и адреса подставятся сами.",
+    register: "Регистрация",
+    registerAction: "Зарегистрироваться",
+    registering: "Регистрируем...",
+    signingIn: "Входим...",
+    createPassword: "Придумайте пароль (от 6 символов)",
+    repeatPassword: "Повторите пароль",
     name: "Имя",
     password: "Пароль",
     phone: "Телефон",
@@ -152,9 +175,14 @@ const t = {
     notificationNotSent:
       "Заказ сохранён, но уведомление магазину пока не отправилось.",
     backHome: "Вернуться на главную",
+    orderCreated: "Заказ создан",
+    orderNumber: "Номер заказа:",
+    receiptUploading: "Загружаем чек и отправляем заказ магазину…",
+    receiptLater: "Чек не загрузился. Загрузите его в «Моих заказах» (Настройки → Мои заказы).",
+    openMyOrders: "Открыть мои заказы",
     myAccount: "Мой аккаунт",
     loginText:
-      "Войдите, чтобы видеть свои данные и заказы.",
+      "Войдите или зарегистрируйтесь, чтобы видеть свои данные и заказы.",
     enter: "Войти",
     myData: "Мои данные",
     save: "Сохранить",
@@ -218,6 +246,21 @@ const t = {
     checkout: "Buyurtmani rasmiylashtirish",
     allRequired:
       "Ism, parol, telefon va manzil majburiy. Izoh ixtiyoriy.",
+    allRequiredLoggedIn:
+      "Ism, telefon va manzil majburiy, izoh — ixtiyoriy.",
+    loggedInAs: "Siz kirgansiz:",
+    newCustomer: "Men yangi xaridorman",
+    haveAccount: "Akkauntim bor",
+    checkoutRegisterHint:
+      "Parol o‘ylab toping — u bilan kirib, buyurtmalaringizni ko‘rasiz.",
+    checkoutLoginHint:
+      "Raqam va parol bilan kiring — ism va manzillar o‘zi qo‘yiladi.",
+    register: "Ro‘yxatdan o‘tish",
+    registerAction: "Ro‘yxatdan o‘tish",
+    registering: "Ro‘yxatdan o‘tkazilmoqda...",
+    signingIn: "Kirilmoqda...",
+    createPassword: "Parol o‘ylab toping (kamida 6 belgi)",
+    repeatPassword: "Parolni qaytaring",
     name: "Ism",
     password: "Parol",
     phone: "Telefon",
@@ -241,9 +284,14 @@ const t = {
     notificationNotSent:
       "Buyurtma saqlandi, lekin do‘konga bildirishnoma hali yuborilmadi.",
     backHome: "Bosh sahifaga",
+    orderCreated: "Buyurtma yaratildi",
+    orderNumber: "Buyurtma raqami:",
+    receiptUploading: "Chek yuklanmoqda va buyurtma do‘konga yuborilmoqda…",
+    receiptLater: "Chek yuklanmadi. Uni «Mening buyurtmalarim» bo‘limidan yuklang (Sozlamalar → Mening buyurtmalarim).",
+    openMyOrders: "Buyurtmalarimni ochish",
     myAccount: "Mening akkauntim",
     loginText:
-      "Ma’lumotlar va buyurtmalarni ko‘rish uchun kiring.",
+      "Ma’lumotlar va buyurtmalarni ko‘rish uchun kiring yoki ro‘yxatdan o‘ting.",
     enter: "Kirish",
     myData: "Mening ma’lumotlarim",
     save: "Saqlash",
@@ -292,6 +340,245 @@ function createAuthEmail(normalizedPhone: string) {
   return `${normalizedPhone}@dumanart.local`;
 }
 
+// Путь чека в Storage: receipts/{uid}/{orderId}/{время}-{имя файла}.
+function createReceiptPath(uid: string, orderId: string, fileName: string) {
+  const safeName =
+    fileName.replace(/[^\w.-]+/g, "_").slice(-80) || "receipt.jpg";
+
+  return `receipts/${uid}/${orderId}/${Date.now()}-${safeName}`;
+}
+
+type Localized = { ru: string; uz: string };
+
+// Ошибка шага оформления с кодом: по коду показываем понятный текст,
+// а сам код пишем в console.error.
+class CheckoutError extends Error {
+  constructor(
+    public code: string,
+    message?: string
+  ) {
+    super(message || code);
+    this.name = "CheckoutError";
+  }
+}
+
+function getErrorCode(error: unknown) {
+  if (error instanceof CheckoutError) {
+    return error.code;
+  }
+
+  const code = (error as { code?: unknown } | null)?.code;
+
+  if (typeof code === "string" && code) {
+    return code;
+  }
+
+  // fetch при обрыве сети бросает TypeError.
+  if (error instanceof TypeError) {
+    return "network";
+  }
+
+  return "unknown";
+}
+
+const CHECKOUT_ERRORS = {
+  phoneRegistered: {
+    ru: "Этот номер уже зарегистрирован. Введите пароль от него или войдите в Настройках",
+    uz: "Bu raqam allaqachon ro‘yxatdan o‘tgan. Uning parolini kiriting yoki Sozlamalarda kiring",
+  },
+  wrongPassword: {
+    ru: "Неверный пароль",
+    uz: "Parol noto‘g‘ri",
+  },
+  wrongLogin: {
+    ru: "Неверный телефон или пароль. Если вы ещё не регистрировались — выберите «Регистрация»",
+    uz: "Telefon yoki parol noto‘g‘ri. Agar hali ro‘yxatdan o‘tmagan bo‘lsangiz — «Ro‘yxatdan o‘tish»ni tanlang",
+  },
+  weakPassword: {
+    ru: "Пароль должен содержать минимум 6 символов",
+    uz: "Parol kamida 6 ta belgidan iborat bo‘lishi kerak",
+  },
+  tooManyRequests: {
+    ru: "Слишком много попыток. Подождите несколько минут и попробуйте снова",
+    uz: "Juda ko‘p urinish. Bir necha daqiqa kuting va qayta urinib ko‘ring",
+  },
+  productUnavailable: {
+    ru: "Товар больше недоступен. Уберите его из корзины и попробуйте снова",
+    uz: "Mahsulot endi mavjud emas. Uni savatdan olib tashlang va qayta urinib ko‘ring",
+  },
+  receiptFailed: {
+    ru: "Не удалось загрузить чек — попробуйте другое фото",
+    uz: "Chekni yuklab bo‘lmadi — boshqa rasmni sinab ko‘ring",
+  },
+  receiptNotImage: {
+    ru: "Чек должен быть фотографией или скриншотом (JPG, PNG, HEIC)",
+    uz: "Chek rasm yoki skrinshot bo‘lishi kerak (JPG, PNG, HEIC)",
+  },
+  receiptTooLarge: {
+    ru: "Фото чека больше 10 МБ — сделайте скриншот и загрузите его",
+    uz: "Chek rasmi 10 MB dan katta — skrinshot qilib yuklang",
+  },
+  offline: {
+    ru: "Нет соединения. Проверьте интернет и попробуйте снова",
+    uz: "Internet aloqasi yo‘q. Tarmoqni tekshirib, qayta urinib ko‘ring",
+  },
+  sessionExpired: {
+    ru: "Сессия истекла. Войдите в аккаунт ещё раз",
+    uz: "Sessiya tugadi. Akkauntga qaytadan kiring",
+  },
+  generic: {
+    ru: "Не удалось оформить заказ. Попробуйте ещё раз",
+    uz: "Buyurtmani rasmiylashtirib bo‘lmadi. Qayta urinib ko‘ring",
+  },
+} satisfies Record<string, Localized>;
+
+// Текст ошибки для покупателя. context — что делали: вход в аккаунт
+// (там invalid-credential значит «неверный телефон или пароль») или заказ
+// (телефон известен, значит неверен пароль).
+function describeCheckoutError(
+  error: unknown,
+  context: "login" | "order" = "order"
+): Localized {
+  const code = getErrorCode(error);
+
+  switch (code) {
+    case "auth/email-already-in-use":
+      return CHECKOUT_ERRORS.phoneRegistered;
+    case "auth/invalid-credential":
+    case "auth/wrong-password":
+    case "auth/user-not-found":
+      return context === "login"
+        ? CHECKOUT_ERRORS.wrongLogin
+        : CHECKOUT_ERRORS.wrongPassword;
+    case "auth/weak-password":
+      return CHECKOUT_ERRORS.weakPassword;
+    case "auth/too-many-requests":
+      return CHECKOUT_ERRORS.tooManyRequests;
+    case "auth/network-request-failed":
+    case "network":
+    case "storage/retry-limit-exceeded":
+      return CHECKOUT_ERRORS.offline;
+    case "order/auth-required":
+    case "auth/user-token-expired":
+    case "auth/requires-recent-login":
+      return CHECKOUT_ERRORS.sessionExpired;
+    case "order/product-unavailable":
+    case "order/invalid-item":
+      return CHECKOUT_ERRORS.productUnavailable;
+    case "order/invalid-phone":
+      return PHONE_FORMAT_ERROR;
+    case "receipt/not-image":
+      return CHECKOUT_ERRORS.receiptNotImage;
+    case "receipt/too-large":
+      return CHECKOUT_ERRORS.receiptTooLarge;
+  }
+
+  if (code.startsWith("storage/") || code.startsWith("receipt/")) {
+    return CHECKOUT_ERRORS.receiptFailed;
+  }
+
+  // Прочие ответы сервера: показываем его текст (он на русском).
+  if (
+    code.startsWith("order/") &&
+    error instanceof CheckoutError &&
+    error.message !== code
+  ) {
+    return { ru: error.message, uz: CHECKOUT_ERRORS.generic.uz };
+  }
+
+  return CHECKOUT_ERRORS.generic;
+}
+
+const PASSWORDS_MISMATCH: Localized = {
+  ru: "Пароли не совпадают",
+  uz: "Parollar mos kelmadi",
+};
+
+const PHONE_ALREADY_REGISTERED_LOGIN: Localized = {
+  ru: "Этот номер уже зарегистрирован. Введите пароль от него и войдите",
+  uz: "Bu raqam allaqachon ro‘yxatdan o‘tgan. Uning parolini kiriting va kiring",
+};
+
+const RECEIPT_MAX_SIZE = 10 * 1024 * 1024;
+
+// Некоторые телефоны отдают файл без MIME-типа — определяем по расширению,
+// иначе Storage примет его как application/octet-stream и правило receipts откажет.
+const RECEIPT_EXTENSION_TYPES: Record<string, string> = {
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  png: "image/png",
+  webp: "image/webp",
+  gif: "image/gif",
+  heic: "image/heic",
+  heif: "image/heif",
+};
+
+function getReceiptContentType(file: File) {
+  if (file.type.startsWith("image/")) {
+    return file.type;
+  }
+
+  const extension = file.name.split(".").pop()?.toLowerCase() || "";
+
+  return RECEIPT_EXTENSION_TYPES[extension] || "";
+}
+
+type PreparedReceipt = {
+  blob: Blob;
+  contentType: string;
+  name: string;
+};
+
+// Готовит чек к загрузке. JPEG/PNG/WebP до 10 МБ — как есть. HEIC с iPhone
+// и большие снимки перекодируются в JPEG (до 2560 px): такое фото откроется
+// и в админке, и в Telegram. Если браузер не умеет декодировать формат,
+// отправляем исходный файл (если он не больше 10 МБ).
+async function prepareReceipt(file: File): Promise<PreparedReceipt> {
+  const contentType = getReceiptContentType(file);
+
+  if (!contentType) {
+    throw new CheckoutError("receipt/not-image");
+  }
+
+  if (
+    ["image/jpeg", "image/png", "image/webp"].includes(contentType) &&
+    file.size <= RECEIPT_MAX_SIZE
+  ) {
+    return { blob: file, contentType, name: file.name };
+  }
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 2560 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement("canvas");
+
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    canvas.getContext("2d")?.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+
+    const blob = await new Promise<Blob | null>((resolve) =>
+      canvas.toBlob(resolve, "image/jpeg", 0.85)
+    );
+
+    if (blob && blob.size <= RECEIPT_MAX_SIZE) {
+      return {
+        blob,
+        contentType: "image/jpeg",
+        name: `${file.name.replace(/\.[^.]*$/, "") || "receipt"}.jpg`,
+      };
+    }
+  } catch (error) {
+    console.warn("Receipt re-encode failed, uploading original:", error);
+  }
+
+  if (file.size > RECEIPT_MAX_SIZE) {
+    throw new CheckoutError("receipt/too-large");
+  }
+
+  return { blob: file, contentType, name: file.name };
+}
+
 // Поле телефона с фиксированным префиксом +998: в value — 9 местных цифр,
 // отображаются как XX XXX XX XX. Вставка «+998 90 ...» тоже работает.
 function UzPhoneInput({
@@ -323,6 +610,118 @@ function UzPhoneInput({
       />
     </div>
   );
+}
+
+// Поле пароля с кнопкой «показать / скрыть».
+function PasswordInput({
+  value,
+  onChange,
+  placeholder,
+  className,
+  autoComplete = "current-password",
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  className: string;
+  autoComplete?: "current-password" | "new-password";
+}) {
+  const [visible, setVisible] = useState(false);
+
+  return (
+    <div className="relative">
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        type={visible ? "text" : "password"}
+        autoComplete={autoComplete}
+        className={`${className} pr-12`}
+      />
+      <button
+        type="button"
+        onClick={() => setVisible((current) => !current)}
+        className="absolute right-2.5 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-base opacity-70 transition hover:opacity-100"
+        aria-label={visible ? "Скрыть пароль" : "Показать пароль"}
+      >
+        {visible ? "🙈" : "👁️"}
+      </button>
+    </div>
+  );
+}
+
+// Переключатель из двух вариантов в стиле магазина («Войти | Регистрация»).
+function SegmentedSwitch<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-1.5 rounded-2xl bg-[#f4f0e9] p-1">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={`rounded-xl px-3 py-2.5 text-sm transition ${
+            value === option.value
+              ? "bg-white font-medium shadow-sm"
+              : "text-[#777066]"
+          }`}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// До первого заказа документа users/{uid} нет: имя, телефон и адреса
+// хранятся в localStorage и переносятся в users сервером при первом заказе.
+type LocalProfile = {
+  name?: string;
+  phone?: string;
+  addresses?: SavedAddress[];
+  passwordChangedOnce?: boolean;
+};
+
+function localProfileKey(uid: string) {
+  return `dumanart_profile_${uid}`;
+}
+
+function readLocalProfile(uid: string): LocalProfile {
+  try {
+    const saved = JSON.parse(
+      localStorage.getItem(localProfileKey(uid)) || "{}"
+    );
+
+    return saved && typeof saved === "object" ? saved : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeLocalProfile(uid: string, patch: LocalProfile) {
+  localStorage.setItem(
+    localProfileKey(uid),
+    JSON.stringify({ ...readLocalProfile(uid), ...patch })
+  );
+}
+
+function clearLocalProfile(uid: string) {
+  localStorage.removeItem(localProfileKey(uid));
+}
+
+// Номер из email аккаунта (998XXXXXXXXX@dumanart.local) — для профиля
+// до первого заказа.
+function phoneFromAuthEmail(email: string | null) {
+  const normalized = normalizeUzPhone(String(email || "").split("@")[0]);
+
+  return normalized ? formatUzPhone(normalized) : "";
 }
 
 // Старый формат (до нормализации): цифры как ввели — только для входа
@@ -413,7 +812,34 @@ export default function Home() {
   const [loginPassword, setLoginPassword] =
     useState("");
   const [loginMessage, setLoginMessage] =
+    useState<Localized | null>(null);
+
+  // Настройки без входа: вкладки «Войти | Регистрация».
+  const [authTab, setAuthTab] =
+    useState<"login" | "register">("login");
+  const [registerName, setRegisterName] =
     useState("");
+  const [registerPhone, setRegisterPhone] =
+    useState("");
+  const [registerPassword, setRegisterPassword] =
+    useState("");
+  const [registerPasswordRepeat, setRegisterPasswordRepeat] =
+    useState("");
+  const [registerMessage, setRegisterMessage] =
+    useState<Localized | null>(null);
+  const [authBusy, setAuthBusy] =
+    useState(false);
+
+  // Оформление без входа: новый покупатель регистрируется вместе с заказом,
+  // покупатель с аккаунтом сначала входит.
+  const [checkoutAuthMode, setCheckoutAuthMode] =
+    useState<"register" | "login">("register");
+  const [passwordRepeat, setPasswordRepeat] =
+    useState("");
+
+  // true — профиль уже в Firestore (users/{uid}), false — пока в localStorage.
+  const [hasRemoteProfile, setHasRemoteProfile] =
+    useState(false);
 
   const [saveMessage, setSaveMessage] =
     useState("");
@@ -431,10 +857,6 @@ export default function Home() {
   const [changingPassword, setChangingPassword] =
     useState(false);
 
-  const [showCheckoutPassword, setShowCheckoutPassword] =
-    useState(false);
-  const [showLoginPassword, setShowLoginPassword] =
-    useState(false);
   const [showCurrentPassword, setShowCurrentPassword] =
     useState(false);
   const [showNewPassword, setShowNewPassword] =
@@ -445,116 +867,19 @@ export default function Home() {
   const [ordering, setOrdering] =
     useState(false);
 
-  const [success, setSuccess] =
-    useState(false);
+  // Результат оформления. Появляется сразу после создания заказа на сервере,
+  // поэтому экран «Заказ принят» показывается, даже если чек не загрузится.
+  const [orderResult, setOrderResult] =
+    useState<{
+      orderId: string;
+      receipt: "uploading" | "done" | "failed";
+      notified: boolean;
+      receiptError?: Localized;
+    } | null>(null);
 
-  const [orderNotificationSent, setOrderNotificationSent] =
-    useState(false);
-
-  useEffect(() => {
-    const savedLanguage =
-      localStorage.getItem(
-        "dumanart_language"
-      ) as Language | null;
-
-    if (
-      savedLanguage === "ru" ||
-      savedLanguage === "uz"
-    ) {
-      setLanguage(savedLanguage);
-    }
-
-    const savedTheme =
-      localStorage.getItem("dumanart_theme");
-
-    if (savedTheme === "dark" || savedTheme === "light") {
-      setThemeMode(savedTheme);
-    }
-
-    loadCart();
-    loadFavorites();
-    loadShopSettings();
-
-    const updateCart = () => {
-      loadCart();
-    };
-
-    const updateFavorites = () => {
-      loadFavorites();
-    };
-
-    // Поддерживаем оба названия событий, чтобы
-    // экран украшений и основной экран всегда синхронизировались.
-    window.addEventListener(
-      "cartUpdated",
-      updateCart
-    );
-
-    window.addEventListener(
-      "dumanart-cart-updated",
-      updateCart
-    );
-
-    window.addEventListener(
-      "favoritesUpdated",
-      updateFavorites
-    );
-
-    window.addEventListener(
-      "dumanart-favorites-updated",
-      updateFavorites
-    );
-
-    const unsubscribe =
-      onAuthStateChanged(
-        auth,
-        async (currentUser) => {
-          setUser(currentUser);
-
-          // Ссылка на админ-панель — только для custom claim admin: true.
-          setIsStoreAdmin(false);
-
-          currentUser
-            ?.getIdTokenResult()
-            .then((result) =>
-              setIsStoreAdmin(
-                result.claims.admin === true
-              )
-            )
-            .catch(console.error);
-
-          if (currentUser) {
-            await loadProfile(
-              currentUser.uid
-            );
-          }
-        }
-      );
-
-    return () => {
-      window.removeEventListener(
-        "cartUpdated",
-        updateCart
-      );
-
-      window.removeEventListener(
-        "dumanart-cart-updated",
-        updateCart
-      );
-
-      window.removeEventListener(
-        "favoritesUpdated",
-        updateFavorites
-      );
-
-      window.removeEventListener(
-        "dumanart-favorites-updated",
-        updateFavorites
-      );
-
-      unsubscribe();
-    };
-  }, []);
+  // Ошибка оформления — показывается над кнопкой заказа.
+  const [orderError, setOrderError] =
+    useState<Localized | null>(null);
 
   useEffect(() => {
     document.body.style.backgroundColor =
@@ -575,6 +900,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!userId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- после выхода очищаем историю заказов
       setOrders([]);
       return;
     }
@@ -672,10 +998,10 @@ export default function Home() {
       }
 
       const normalized = await Promise.all(
-        saved.map(async (item: any) => {
+        saved.map(async (item: StoredCartItem | null) => {
           const quantity =
             Number(item?.quantity) > 0
-              ? Number(item.quantity)
+              ? Number(item?.quantity)
               : 1;
 
           // Новый полный формат корзины.
@@ -902,72 +1228,234 @@ export default function Home() {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- подгрузка товаров избранного при смене списка
     loadFavoriteProducts(favorites);
   }, [favorites]);
 
+  // Профиль: из users/{uid}, а до первого заказа — из localStorage
+  // (имя из регистрации, телефон из аккаунта).
   async function loadProfile(
-    uid: string
+    currentUser: User
   ) {
     try {
       const snapshot = await getDoc(
-        doc(db, "users", uid)
+        doc(db, "users", currentUser.uid)
       );
 
-      if (!snapshot.exists()) return;
-
-      const data =
-        snapshot.data() as UserProfile;
-
-      setName(data.name || "");
-      // В полях телефона храним 9 местных цифр, +998 показывается отдельно.
-      setPhone(toLocalPhoneDigits(data.phone));
-      setPasswordChangedOnce(data.passwordChangedOnce === true);
-
-      setEditName(data.name || "");
-      setEditPhone(toLocalPhoneDigits(data.phone));
-      setEditAddress(data.address || "");
-
-      const loadedAddresses = Array.isArray(data.addresses)
-        ? data.addresses
-            .filter((item: any) => item && item.address)
-            .map((item: any, index: number) => ({
-              id: String(item.id || `address-${index}`),
-              label: String(
-                item.label ||
-                (language === "ru"
-                  ? `Адрес ${index + 1}`
-                  : `Manzil ${index + 1}`)
-              ),
-              address: String(item.address || "").trim(),
-            }))
-            .filter((item: SavedAddress) => item.address)
-        : [];
-
-      const finalAddresses =
-        loadedAddresses.length > 0
-          ? loadedAddresses
-          : data.address
-          ? [{
-              id: "legacy-main",
-              label: language === "ru" ? "Основной" : "Asosiy",
-              address: String(data.address).trim(),
-            }]
-          : [];
-
-      setSavedAddresses(finalAddresses);
-
-      if (finalAddresses.length > 0) {
-        const first = finalAddresses[0];
-        setSelectedAddressId(first.id);
-        setAddress(first.address);
-      } else {
-        setSelectedAddressId("");
-        setAddress("");
+      if (snapshot.exists()) {
+        // Профиль уже перенесён в базу — локальная копия больше не нужна.
+        clearLocalProfile(currentUser.uid);
+        setHasRemoteProfile(true);
+        applyProfile(snapshot.data() as UserProfile);
+        return;
       }
+
+      const local = readLocalProfile(currentUser.uid);
+
+      setHasRemoteProfile(false);
+      applyProfile({
+        name: local.name || currentUser.displayName || "",
+        phone: local.phone || phoneFromAuthEmail(currentUser.email),
+        addresses: local.addresses,
+        passwordChangedOnce: local.passwordChangedOnce,
+      });
     } catch (error) {
       console.error(error);
     }
   }
+
+  function applyProfile(data: UserProfile) {
+    // Пустые значения не затирают то, что покупатель уже ввёл в форме заказа.
+    if (data.name) {
+      setName(data.name);
+    }
+
+    if (data.phone) {
+      // В полях телефона храним 9 местных цифр, +998 показывается отдельно.
+      setPhone(toLocalPhoneDigits(data.phone));
+    }
+
+    setPasswordChangedOnce(data.passwordChangedOnce === true);
+
+    setEditName(data.name || "");
+    setEditPhone(toLocalPhoneDigits(data.phone));
+    setEditAddress(data.address || "");
+
+    const loadedAddresses = Array.isArray(data.addresses)
+      ? data.addresses
+          .filter((item: Partial<SavedAddress> | null) => item && item.address)
+          .map((item: Partial<SavedAddress>, index: number) => ({
+            id: String(item.id || `address-${index}`),
+            label: String(
+              item.label ||
+              (language === "ru"
+                ? `Адрес ${index + 1}`
+                : `Manzil ${index + 1}`)
+            ),
+            address: String(item.address || "").trim(),
+          }))
+          .filter((item: SavedAddress) => item.address)
+      : [];
+
+    const finalAddresses =
+      loadedAddresses.length > 0
+        ? loadedAddresses
+        : data.address
+        ? [{
+            id: "legacy-main",
+            label: language === "ru" ? "Основной" : "Asosiy",
+            address: String(data.address).trim(),
+          }]
+        : [];
+
+    setSavedAddresses(finalAddresses);
+
+    if (finalAddresses.length > 0) {
+      const first = finalAddresses[0];
+      setSelectedAddressId(first.id);
+      setAddress(first.address);
+    } else {
+      setSelectedAddressId("");
+    }
+  }
+
+  // Сохраняет изменения профиля: в users/{uid}, если профиль уже в базе,
+  // иначе — локально до первого заказа. remoteExtra — поля только для базы.
+  async function persistProfile(
+    currentUser: User,
+    patch: LocalProfile & { address?: string },
+    remoteExtra: Record<string, unknown> = {}
+  ) {
+    if (hasRemoteProfile) {
+      await setDoc(
+        doc(db, "users", currentUser.uid),
+        {
+          ...patch,
+          ...remoteExtra,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
+      return;
+    }
+
+    writeLocalProfile(currentUser.uid, patch);
+  }
+
+  useEffect(() => {
+    const savedLanguage =
+      localStorage.getItem(
+        "dumanart_language"
+      ) as Language | null;
+
+    if (
+      savedLanguage === "ru" ||
+      savedLanguage === "uz"
+    ) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- язык и тема из localStorage доступны только после монтирования (иначе ошибка гидратации)
+      setLanguage(savedLanguage);
+    }
+
+    const savedTheme =
+      localStorage.getItem("dumanart_theme");
+
+    if (savedTheme === "dark" || savedTheme === "light") {
+      setThemeMode(savedTheme);
+    }
+
+    // Команда бота /orders открывает Mini App с ?tab=orders —
+    // «Мои заказы» находятся в Настройках.
+    if (
+      new URLSearchParams(window.location.search).get("tab") ===
+      "orders"
+    ) {
+      setTab("settings");
+    }
+
+    loadCart();
+    loadFavorites();
+    loadShopSettings();
+
+    const updateCart = () => {
+      loadCart();
+    };
+
+    const updateFavorites = () => {
+      loadFavorites();
+    };
+
+    // Поддерживаем оба названия событий, чтобы
+    // экран украшений и основной экран всегда синхронизировались.
+    window.addEventListener(
+      "cartUpdated",
+      updateCart
+    );
+
+    window.addEventListener(
+      "dumanart-cart-updated",
+      updateCart
+    );
+
+    window.addEventListener(
+      "favoritesUpdated",
+      updateFavorites
+    );
+
+    window.addEventListener(
+      "dumanart-favorites-updated",
+      updateFavorites
+    );
+
+    const unsubscribe =
+      onAuthStateChanged(
+        auth,
+        async (currentUser) => {
+          setUser(currentUser);
+
+          // Ссылка на админ-панель — только для custom claim admin: true.
+          setIsStoreAdmin(false);
+
+          currentUser
+            ?.getIdTokenResult()
+            .then((result) =>
+              setIsStoreAdmin(
+                result.claims.admin === true
+              )
+            )
+            .catch(console.error);
+
+          if (currentUser) {
+            await loadProfile(
+              currentUser
+            );
+          }
+        }
+      );
+
+    return () => {
+      window.removeEventListener(
+        "cartUpdated",
+        updateCart
+      );
+
+      window.removeEventListener(
+        "dumanart-cart-updated",
+        updateCart
+      );
+
+      window.removeEventListener(
+        "favoritesUpdated",
+        updateFavorites
+      );
+
+      window.removeEventListener(
+        "dumanart-favorites-updated",
+        updateFavorites
+      );
+
+      unsubscribe();
+    };
+  }, []);
 
   function saveCart(
     updated: CartProduct[]
@@ -1128,73 +1616,193 @@ export default function Home() {
     newTab: Tab
   ) {
     setTab(newTab);
-    setSuccess(false);
+
+    // Пока чек загружается, экран результата не сбрасываем —
+    // иначе при возврате в корзину покупатель не увидит номер заказа.
+    setOrderResult((current) =>
+      current?.receipt === "uploading" ? current : null
+    );
+  }
+
+  // Вход по телефону и паролю (с запасным старым форматом email).
+  async function signInWithPhone(
+    localPhone: string,
+    passwordValue: string
+  ) {
+    const normalized = normalizeUzPhone(localPhone);
+
+    if (!normalized) {
+      throw new CheckoutError("order/invalid-phone");
+    }
+
+    try {
+      return (
+        await signInWithEmailAndPassword(
+          auth,
+          createAuthEmail(normalized),
+          passwordValue
+        )
+      ).user;
+    } catch (error) {
+      // Аккаунт мог быть создан до нормализации номера (только цифры,
+      // как ввели) — пробуем старый формат email.
+      const legacyEmail =
+        createLegacyAuthEmail(localPhone);
+      const notFound = [
+        "auth/invalid-credential",
+        "auth/user-not-found",
+        "auth/invalid-email",
+      ].includes(getErrorCode(error));
+
+      if (
+        !notFound ||
+        legacyEmail === createAuthEmail(normalized)
+      ) {
+        throw error;
+      }
+
+      try {
+        return (
+          await signInWithEmailAndPassword(
+            auth,
+            legacyEmail,
+            passwordValue
+          )
+        ).user;
+      } catch {
+        // Ошибку старого формата не показываем — она запутает.
+        throw error;
+      }
+    }
+  }
+
+  // Регистрация создаёт только аккаунт Firebase Auth. Документ users/{uid}
+  // появится при первом заказе, а пока имя и телефон — в localStorage.
+  async function registerWithPhone(
+    nameValue: string,
+    normalizedPhone: string,
+    passwordValue: string
+  ) {
+    const credential =
+      await createUserWithEmailAndPassword(
+        auth,
+        createAuthEmail(normalizedPhone),
+        passwordValue
+      );
+
+    writeLocalProfile(credential.user.uid, {
+      name: nameValue,
+      phone: formatUzPhone(normalizedPhone),
+    });
+
+    // Имя ещё и в Auth — чтобы оно было и на другом устройстве.
+    await updateProfile(credential.user, {
+      displayName: nameValue,
+    }).catch((error) =>
+      console.error("displayName update failed:", error)
+    );
+
+    await loadProfile(credential.user);
+
+    return credential.user;
   }
 
   async function loginClient() {
-    if (
-      !loginPhone ||
-      !loginPassword
-    ) {
-      setLoginMessage(
-        text.enterPhonePassword
-      );
+    if (authBusy) return;
+
+    if (!loginPhone || !loginPassword) {
+      setLoginMessage({
+        ru: t.ru.enterPhonePassword,
+        uz: t.uz.enterPhonePassword,
+      });
       return;
     }
 
-    const normalizedLoginPhone =
-      normalizeUzPhone(loginPhone);
-
-    if (!normalizedLoginPhone) {
-      setLoginMessage(PHONE_FORMAT_ERROR[language]);
+    if (!normalizeUzPhone(loginPhone)) {
+      setLoginMessage(PHONE_FORMAT_ERROR);
       return;
     }
 
     try {
-      setLoginMessage("");
+      setAuthBusy(true);
+      setLoginMessage(null);
 
-      try {
-        await signInWithEmailAndPassword(
-          auth,
-          createAuthEmail(normalizedLoginPhone),
-          loginPassword
-        );
-      } catch (error) {
-        // Аккаунт мог быть создан до нормализации номера (только цифры,
-        // как ввели) — пробуем старый формат email.
-        const legacyEmail =
-          createLegacyAuthEmail(loginPhone);
-        const notFound = [
-          "auth/invalid-credential",
-          "auth/user-not-found",
-          "auth/invalid-email",
-        ].includes(
-          String((error as { code?: string })?.code)
-        );
-
-        if (
-          !notFound ||
-          legacyEmail ===
-            createAuthEmail(normalizedLoginPhone)
-        ) {
-          throw error;
-        }
-
-        await signInWithEmailAndPassword(
-          auth,
-          legacyEmail,
-          loginPassword
-        );
-      }
+      await signInWithPhone(loginPhone, loginPassword);
 
       setLoginPhone("");
       setLoginPassword("");
     } catch (error) {
-      console.error(error);
+      console.error(
+        `Login failed [${getErrorCode(error)}]:`,
+        error
+      );
 
       setLoginMessage(
-        text.invalidLogin
+        describeCheckoutError(error, "login")
       );
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function registerClient() {
+    if (authBusy) return;
+
+    setRegisterMessage(null);
+
+    if (!registerName.trim()) {
+      setRegisterMessage({ ru: "Введите имя", uz: "Ismingizni kiriting" });
+      return;
+    }
+
+    const normalized = normalizeUzPhone(registerPhone);
+
+    if (!normalized) {
+      setRegisterMessage(PHONE_FORMAT_ERROR);
+      return;
+    }
+
+    if (registerPassword.length < 6) {
+      setRegisterMessage(CHECKOUT_ERRORS.weakPassword);
+      return;
+    }
+
+    if (registerPassword !== registerPasswordRepeat) {
+      setRegisterMessage(PASSWORDS_MISMATCH);
+      return;
+    }
+
+    try {
+      setAuthBusy(true);
+
+      await registerWithPhone(
+        registerName.trim(),
+        normalized,
+        registerPassword
+      );
+
+      setRegisterName("");
+      setRegisterPhone("");
+      setRegisterPassword("");
+      setRegisterPasswordRepeat("");
+    } catch (error) {
+      console.error(
+        `Registration failed [${getErrorCode(error)}]:`,
+        error
+      );
+
+      if (getErrorCode(error) === "auth/email-already-in-use") {
+        // Номер уже есть — переводим на вкладку входа с этим номером.
+        setAuthTab("login");
+        setLoginPhone(registerPhone);
+        setLoginPassword("");
+        setLoginMessage(PHONE_ALREADY_REGISTERED_LOGIN);
+        return;
+      }
+
+      setRegisterMessage(describeCheckoutError(error));
+    } finally {
+      setAuthBusy(false);
     }
   }
 
@@ -1203,6 +1811,11 @@ export default function Home() {
 
     setUser(null);
     setOrders([]);
+    setHasRemoteProfile(false);
+    setName("");
+    setPhone("");
+    setEditName("");
+    setEditPhone("");
     setSavedAddresses([]);
     setSelectedAddressId("");
     setAddress("");
@@ -1252,20 +1865,21 @@ export default function Home() {
       await reauthenticateWithCredential(user, credential);
       await updatePassword(user, newPassword);
 
-      await updateDoc(doc(db, "users", user.uid), {
-        passwordChangedOnce: true,
-        passwordChangedAt: serverTimestamp(),
-      });
+      await persistProfile(
+        user,
+        { passwordChangedOnce: true },
+        { passwordChangedAt: serverTimestamp() }
+      );
 
       setPasswordChangedOnce(true);
       setCurrentPassword("");
       setNewPassword("");
       setConfirmNewPassword("");
       setPasswordChangeMessage(text.passwordChangedSuccess);
-    } catch (error: any) {
+    } catch (error) {
       console.error(error);
 
-      const code = error?.code || "";
+      const code = (error as { code?: string } | null)?.code || "";
       setPasswordChangeMessage(
         code === "auth/wrong-password" || code === "auth/invalid-credential"
           ? text.wrongCurrentPassword
@@ -1306,10 +1920,9 @@ export default function Home() {
         savedAddresses[0]?.address ||
         editAddress.trim();
 
-      const profileData: Record<string, any> = {
+      const profileData: LocalProfile & { address?: string } = {
         name: editName.trim(),
         phone: formatUzPhone(normalizedEditPhone),
-        updatedAt: serverTimestamp(),
       };
 
       if (selectedSavedAddress) {
@@ -1320,11 +1933,7 @@ export default function Home() {
         profileData.addresses = savedAddresses;
       }
 
-      await setDoc(
-        doc(db, "users", user.uid),
-        profileData,
-        { merge: true }
-      );
+      await persistProfile(user, profileData);
 
       setName(editName.trim());
       setPhone(toLocalPhoneDigits(normalizedEditPhone));
@@ -1371,15 +1980,10 @@ export default function Home() {
     const updated = [...savedAddresses, newItem];
 
     try {
-      await setDoc(
-        doc(db, "users", user.uid),
-        {
-          addresses: updated,
-          address: addressValue,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      await persistProfile(user, {
+        addresses: updated,
+        address: addressValue,
+      });
 
       setSavedAddresses(updated);
       setSelectedAddressId(newItem.id);
@@ -1415,15 +2019,10 @@ export default function Home() {
       )?.address || "";
 
     try {
-      await setDoc(
-        doc(db, "users", user.uid),
-        {
-          addresses: updated,
-          address: nextAddress,
-          updatedAt: serverTimestamp(),
-        },
-        { merge: true }
-      );
+      await persistProfile(user, {
+        addresses: updated,
+        address: nextAddress,
+      });
 
       setSavedAddresses(updated);
       setSelectedAddressId(nextSelectedId);
@@ -1453,10 +2052,10 @@ export default function Home() {
 
   function getTelegramContext() {
     if (typeof window === "undefined") {
-      return { initData: "", user: null as any };
+      return { initData: "", user: null };
     }
 
-    const telegram = (window as any).Telegram?.WebApp;
+    const telegram = window.Telegram?.WebApp;
 
     return {
       initData: String(telegram?.initData || ""),
@@ -1466,42 +2065,50 @@ export default function Home() {
 
   // Загружает чек в receipts/{uid}/{orderId}/ и просит сервер прикрепить его
   // к заказу и уведомить администраторов. Возвращает true, если админы уведомлены.
+  // Ошибки — CheckoutError с кодом receipt/* или ошибки Storage (storage/*).
   async function uploadReceiptForOrder(
     currentUser: User,
     orderId: string,
     file: File
   ) {
-    const receiptPath = `receipts/${currentUser.uid}/${orderId}/${Date.now()}-${file.name.replace(/[\\/]/g, "_")}`;
+    const receipt = await prepareReceipt(file);
+    const receiptPath = createReceiptPath(currentUser.uid, orderId, receipt.name);
 
     await uploadBytes(
       ref(storage, receiptPath),
-      file,
-      { contentType: file.type || undefined }
+      receipt.blob,
+      { contentType: receipt.contentType }
     );
 
-    const response = await fetch(
-      "/api/orders/receipt",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${await currentUser.getIdToken()}`,
-        },
-        body: JSON.stringify({
-          orderId,
-          receiptPath,
-        }),
-      }
-    );
+    let response: Response;
+
+    try {
+      response = await fetch(
+        "/api/orders/receipt",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${await currentUser.getIdToken()}`,
+          },
+          body: JSON.stringify({
+            orderId,
+            receiptPath,
+          }),
+        }
+      );
+    } catch {
+      throw new CheckoutError("network");
+    }
 
     const data = await response
       .json()
       .catch(() => null);
 
     if (!response.ok || !data?.ok) {
-      throw new Error(
-        data?.error ||
-          `Receipt attach failed: ${response.status}`
+      throw new CheckoutError(
+        `receipt/attach-${response.status}`,
+        data?.error
       );
     }
 
@@ -1515,20 +2122,6 @@ export default function Home() {
     file: File
   ) {
     if (!user) return;
-
-    if (!file.type.startsWith("image/")) {
-      alert(text.receiptText);
-      return;
-    }
-
-    if (file.size > 10 * 1024 * 1024) {
-      alert(
-        language === "ru"
-          ? "Размер чека не должен превышать 10 МБ"
-          : "Chek hajmi 10 MB dan oshmasligi kerak"
-      );
-      return;
-    }
 
     try {
       setReceiptUploadingId(orderId);
@@ -1548,43 +2141,87 @@ export default function Home() {
           : "✅ Chek yuklandi"
       );
     } catch (error) {
-      console.error(error);
-
-      alert(
-        language === "ru"
-          ? "Не удалось загрузить чек. Попробуйте ещё раз"
-          : "Chekni yuklab bo‘lmadi. Qayta urinib ko‘ring"
+      console.error(
+        `Receipt upload failed [${getErrorCode(error)}]:`,
+        error
       );
+
+      alert(describeCheckoutError(error)[language]);
     } finally {
       setReceiptUploadingId(null);
     }
   }
 
-  async function createOrder() {
-    if (!name.trim()) {
-      alert(text.name);
-      return;
+  // Новый покупатель регистрируется прямо при оформлении заказа.
+  // Если номер уже зарегистрирован и пароль от него подошёл — просто входим.
+  async function ensureCheckoutUser(
+    normalizedPhone: string
+  ) {
+    if (auth.currentUser) {
+      return auth.currentUser;
     }
 
-    if (password.length < 6) {
-      alert(
-        language === "ru"
-          ? "Пароль должен содержать минимум 6 символов"
-          : "Parol kamida 6 ta belgidan iborat bo‘lishi kerak"
+    try {
+      return await registerWithPhone(
+        name.trim(),
+        normalizedPhone,
+        password
       );
+    } catch (error) {
+      if (getErrorCode(error) !== "auth/email-already-in-use") {
+        throw error;
+      }
+    }
+
+    try {
+      return (
+        await signInWithEmailAndPassword(
+          auth,
+          createAuthEmail(normalizedPhone),
+          password
+        )
+      ).user;
+    } catch (error) {
+      const code = getErrorCode(error);
+
+      if (
+        code === "auth/invalid-credential" ||
+        code === "auth/wrong-password"
+      ) {
+        throw new CheckoutError("auth/email-already-in-use");
+      }
+
+      throw error;
+    }
+  }
+
+  async function createOrder() {
+    if (ordering) return;
+
+    setOrderError(null);
+
+    if (!name.trim()) {
+      setOrderError({ ru: "Введите имя", uz: "Ismingizni kiriting" });
       return;
     }
 
-    if (!phone.trim()) {
-      alert(text.phone);
-      return;
+    if (!auth.currentUser) {
+      if (password.length < 6) {
+        setOrderError(CHECKOUT_ERRORS.weakPassword);
+        return;
+      }
+
+      if (password !== passwordRepeat) {
+        setOrderError(PASSWORDS_MISMATCH);
+        return;
+      }
     }
 
     const normalizedPhone =
       normalizeUzPhone(phone);
 
     if (!normalizedPhone) {
-      alert(PHONE_FORMAT_ERROR[language]);
+      setOrderError(PHONE_FORMAT_ERROR);
       return;
     }
 
@@ -1592,213 +2229,165 @@ export default function Home() {
       formatUzPhone(normalizedPhone);
 
     if (!address.trim()) {
-      alert(text.address);
+      setOrderError({
+        ru: "Укажите адрес доставки",
+        uz: "Yetkazib berish manzilini kiriting",
+      });
       return;
     }
 
     if (!receiptFile) {
-      alert(text.uploadReceipt);
+      setOrderError({
+        ru: "Загрузите чек об оплате",
+        uz: "To‘lov chekini yuklang",
+      });
       return;
     }
 
-    if (
-      receiptFile.size >
-      10 * 1024 * 1024
-    ) {
-      alert(
-        language === "ru"
-          ? "Размер чека не должен превышать 10 МБ"
-          : "Chek hajmi 10 MB dan oshmasligi kerak"
-      );
+    if (!getReceiptContentType(receiptFile)) {
+      setOrderError(CHECKOUT_ERRORS.receiptNotImage);
       return;
     }
 
     if (!cardNumber) {
-      alert(
-        language === "ru"
-          ? "Номер карты пока не настроен магазином"
-          : "Do‘kon kartasi hali sozlanmagan"
-      );
+      setOrderError({
+        ru: "Номер карты пока не настроен магазином",
+        uz: "Do‘kon kartasi hali sozlanmagan",
+      });
       return;
     }
 
     if (cart.length === 0) {
-      alert(text.emptyCart);
+      setOrderError({ ru: t.ru.emptyCart, uz: t.uz.emptyCart });
       return;
     }
 
+    if (!navigator.onLine) {
+      setOrderError(CHECKOUT_ERRORS.offline);
+      return;
+    }
+
+    setOrdering(true);
+
     try {
-      setOrdering(true);
-
-      const email =
-        createAuthEmail(normalizedPhone);
-
-      let currentUser =
-        auth.currentUser;
-
-      if (!currentUser) {
-        try {
-          const credential =
-            await createUserWithEmailAndPassword(
-              auth,
-              email,
-              password
-            );
-
-          currentUser =
-            credential.user;
-        } catch (error: any) {
-          if (
-            error?.code ===
-            "auth/email-already-in-use"
-          ) {
-            const credential =
-              await signInWithEmailAndPassword(
-                auth,
-                email,
-                password
-              );
-
-            currentUser =
-              credential.user;
-          } else {
-            throw error;
-          }
-        }
-      }
+      const currentUser =
+        await ensureCheckoutUser(normalizedPhone);
 
       const telegramContext =
         getTelegramContext();
 
-      const userRef = doc(
-        db,
-        "users",
-        currentUser.uid
-      );
-
-      const userDoc =
-        await getDoc(userRef);
-
-      if (userDoc.exists()) {
-        await updateDoc(
-          userRef,
-          {
-            name: name.trim(),
-            phone: displayPhone,
-            address:
-              address.trim(),
-          }
-        );
-      } else {
-        const { setDoc } =
-          await import(
-            "firebase/firestore"
-          );
-
-        await setDoc(
-          userRef,
-          {
-            name: name.trim(),
-            phone: displayPhone,
-            address:
-              address.trim(),
-            createdAt:
-              serverTimestamp(),
-          }
-        );
-      }
-
       // Заказ создаёт сервер: цены, сумму и статусы он берёт из базы,
       // Telegram ID — из подписанного initData.
-      const createResponse = await fetch(
-        "/api/orders/create",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${await currentUser.getIdToken()}`,
-          },
-          body: JSON.stringify({
-            items: cart.map((item) => ({
-              productId: item.id,
-              quantity: item.quantity,
-            })),
-            customer: {
-              name: name.trim(),
-              phone: displayPhone,
-              address: address.trim(),
-              comment: comment.trim(),
+      let createResponse: Response;
+
+      try {
+        createResponse = await fetch(
+          "/api/orders/create",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${await currentUser.getIdToken()}`,
             },
-            initData: telegramContext.initData,
-          }),
-        }
-      );
+            body: JSON.stringify({
+              items: cart.map((item) => ({
+                productId: item.id,
+                quantity: item.quantity,
+              })),
+              customer: {
+                name: name.trim(),
+                phone: displayPhone,
+                address: address.trim(),
+                comment: comment.trim(),
+              },
+              initData: telegramContext.initData,
+              // Профиль до первого заказа: сервер перенесёт его в users/{uid}.
+              profile: readLocalProfile(currentUser.uid),
+            }),
+          }
+        );
+      } catch {
+        throw new CheckoutError("network");
+      }
 
       const created = await createResponse
         .json()
         .catch(() => null);
 
       if (!createResponse.ok || !created?.orderId) {
-        console.error("Order creation failed:", created);
-
-        alert(
-          created?.error && language === "ru"
-            ? created.error
-            : language === "ru"
-              ? "Не удалось оформить заказ"
-              : "Buyurtmani rasmiylashtirib bo‘lmadi"
+        throw new CheckoutError(
+          `order/${created?.code || `http-${createResponse.status}`}`,
+          created?.error
         );
-        return;
       }
 
-      // Заказ уже создан — корзину очищаем, даже если чек не загрузится:
-      // его можно догрузить из истории заказов.
+      const orderId = String(created.orderId);
+
+      // Заказ создан — сразу показываем экран результата с номером
+      // и очищаем корзину. Чек загружается уже на этом экране.
+      setOrderResult({
+        orderId,
+        receipt: "uploading",
+        notified: false,
+      });
+
       localStorage.removeItem(
         "dumanart_cart"
       );
 
       setCart([]);
       setPassword("");
+      setPasswordRepeat("");
       setComment("");
+      setReceiptFile(null);
 
-      let notificationSent = false;
+      // Первый заказ создал users/{uid} — переключаемся на профиль из базы.
+      if (created.profileCreated) {
+        loadProfile(currentUser);
+      }
 
       try {
-        notificationSent =
+        const notified =
           await uploadReceiptForOrder(
             currentUser,
-            created.orderId,
+            orderId,
             receiptFile
           );
+
+        setOrderResult({
+          orderId,
+          receipt: "done",
+          notified,
+        });
       } catch (receiptError) {
         console.error(
-          "Receipt upload failed:",
+          `Receipt upload failed [${getErrorCode(receiptError)}]:`,
           receiptError
         );
 
-        alert(
-          language === "ru"
-            ? "Заказ оформлен, но чек не загрузился. Загрузите его в истории заказов (Настройки → Мои заказы)."
-            : "Buyurtma qabul qilindi, lekin chek yuklanmadi. Uni buyurtmalar tarixidan yuklang."
-        );
+        setOrderResult({
+          orderId,
+          receipt: "failed",
+          notified: false,
+          receiptError: describeCheckoutError(receiptError),
+        });
+      }
+    } catch (error) {
+      console.error(
+        `Order failed [${getErrorCode(error)}]:`,
+        error
+      );
+
+      if (getErrorCode(error) === "auth/email-already-in-use") {
+        // Номер уже зарегистрирован — предлагаем войти прямо в форме.
+        setCheckoutAuthMode("login");
+        setLoginPhone(phone);
+        setLoginPassword("");
+        setLoginMessage(PHONE_ALREADY_REGISTERED_LOGIN);
+        return;
       }
 
-      setOrderNotificationSent(
-        notificationSent
-      );
-
-      setReceiptFile(null);
-
-      // Историю заказов обновляет подписка onSnapshot.
-      setSuccess(true);
-    } catch (error) {
-      console.error(error);
-
-      alert(
-        language === "ru"
-          ? "Не удалось оформить заказ"
-          : "Buyurtmani rasmiylashtirib bo‘lmadi"
-      );
+      setOrderError(describeCheckoutError(error));
     } finally {
       setOrdering(false);
     }
@@ -1811,8 +2400,8 @@ export default function Home() {
         strategy="afterInteractive"
         onLoad={() => {
           try {
-            (window as any).Telegram?.WebApp?.ready?.();
-            (window as any).Telegram?.WebApp?.expand?.();
+            window.Telegram?.WebApp?.ready?.();
+            window.Telegram?.WebApp?.expand?.();
           } catch {}
         }}
       />
@@ -2141,9 +2730,19 @@ export default function Home() {
             {favoriteProducts.length === 0 ? (
               <div className="mt-8 rounded-[24px] bg-white p-8 text-center shadow-sm">
 
-                <div className="text-4xl">
-                  ♡
-                </div>
+                <svg
+                  viewBox="0 0 24 24"
+                  className="mx-auto h-10 w-10"
+                  style={{ color: themeMode === "dark" ? FAVORITE_COLOR.dark : FAVORITE_COLOR.light }}
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M20.8 8.6c0 5.1-8.8 10.1-8.8 10.1S3.2 13.7 3.2 8.6A4.6 4.6 0 0 1 12 6.2a4.6 4.6 0 0 1 8.8 2.4Z" />
+                </svg>
 
                 <h2 className="mt-4 font-serif text-xl">
                   {text.emptyFavorite}
@@ -2276,7 +2875,7 @@ export default function Home() {
               {text.cart}
             </h1>
 
-            {success ? (
+            {orderResult ? (
               <div className="mt-8 rounded-[24px] bg-white p-8 text-center shadow-sm">
 
                 <div className="text-5xl">
@@ -2284,36 +2883,79 @@ export default function Home() {
                 </div>
 
                 <h2 className="mt-4 font-serif text-2xl">
-                  {text.accepted}
+                  {orderResult.receipt === "failed"
+                    ? text.orderCreated
+                    : text.accepted}
                 </h2>
 
-                <p className="mt-2 text-sm leading-6 text-[#777066]">
-                  {text.sentReceipt}
+                <p className="mt-2 text-sm text-[#777066]">
+                  {text.orderNumber}{" "}
+                  <strong className="text-[#171717]">
+                    {formatOrderNumber(orderResult.orderId)}
+                  </strong>
                 </p>
 
-                <div
-                  className={`mt-4 rounded-2xl px-4 py-3 text-sm ${
-                    orderNotificationSent
-                      ? "bg-emerald-50 text-emerald-700"
-                      : "bg-amber-50 text-amber-700"
-                  }`}
-                >
-                  {orderNotificationSent
-                    ? text.notificationSent
-                    : text.notificationNotSent}
-                </div>
+                {orderResult.receipt === "uploading" && (
+                  <div className="mt-4 rounded-2xl bg-[#f4f0e9] px-4 py-3 text-sm text-[#6f675e]">
+                    {text.receiptUploading}
+                  </div>
+                )}
 
-                <button
-                  onClick={() => {
-                    setSuccess(false);
-                    changeTab("home");
-                  }}
-                  className="mt-6 rounded-full bg-[#171717] px-6 py-3 text-sm text-white"
-                >
-                  {text.backHome}
-                </button>
+                {orderResult.receipt === "done" && (
+                  <>
+                    <p className="mt-2 text-sm leading-6 text-[#777066]">
+                      {text.sentReceipt}
+                    </p>
+
+                    <div
+                      className={`mt-4 rounded-2xl px-4 py-3 text-sm ${
+                        orderResult.notified
+                          ? "bg-emerald-50 text-emerald-700"
+                          : "bg-amber-50 text-amber-700"
+                      }`}
+                    >
+                      {orderResult.notified
+                        ? text.notificationSent
+                        : text.notificationNotSent}
+                    </div>
+                  </>
+                )}
+
+                {orderResult.receipt === "failed" && (
+                  <>
+                    <div className="mt-4 rounded-2xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-700">
+                      {text.receiptLater}
+                      {orderResult.receiptError && (
+                        <span className="mt-1 block text-xs opacity-80">
+                          {orderResult.receiptError[language]}
+                        </span>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={() => changeTab("settings")}
+                      className="mt-4 w-full rounded-full bg-[#171717] px-6 py-3 text-sm text-white"
+                    >
+                      {text.openMyOrders}
+                    </button>
+                  </>
+                )}
+
+                {orderResult.receipt !== "uploading" && (
+                  <button
+                    onClick={() => changeTab("home")}
+                    className={`mt-3 rounded-full px-6 py-3 text-sm ${
+                      orderResult.receipt === "failed"
+                        ? "bg-[#f4f0e9] text-[#6f675e]"
+                        : "bg-[#171717] text-white"
+                    }`}
+                  >
+                    {text.backHome}
+                  </button>
+                )}
 
               </div>
+
             ) : cart.length === 0 ? (
               <div className="mt-8 rounded-[24px] bg-white p-8 text-center shadow-sm">
 
@@ -2486,10 +3128,70 @@ export default function Home() {
                     {text.checkout}
                   </h2>
 
-                  <p className="mt-2 text-xs text-[#81796f]">
-                    {text.allRequired}
-                  </p>
+                  {user ? (
+                    <p className="mt-2 text-xs text-[#81796f]">
+                      {text.loggedInAs}{" "}
+                      <strong>{phoneFromAuthEmail(user.email) || user.email}</strong>
+                      {". "}
+                      {text.allRequiredLoggedIn}
+                    </p>
+                  ) : (
+                    <div className="mt-4 space-y-2">
+                      <SegmentedSwitch
+                        value={checkoutAuthMode}
+                        options={[
+                          { value: "register", label: text.newCustomer },
+                          { value: "login", label: text.haveAccount },
+                        ]}
+                        onChange={(mode) => {
+                          setCheckoutAuthMode(mode);
+                          setLoginMessage(null);
+                          setOrderError(null);
+                        }}
+                      />
+                      <p className="text-xs leading-5 text-[#81796f]">
+                        {checkoutAuthMode === "register"
+                          ? text.checkoutRegisterHint
+                          : text.checkoutLoginHint}
+                      </p>
+                    </div>
+                  )}
 
+                  {!user && checkoutAuthMode === "login" ? (
+                    <div className="mt-4 space-y-3">
+                      <UzPhoneInput
+                        value={loginPhone}
+                        onChange={setLoginPhone}
+                        placeholder="XX XXX XX XX"
+                        className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none"
+                      />
+
+                      <PasswordInput
+                        value={loginPassword}
+                        onChange={setLoginPassword}
+                        placeholder={text.password}
+                        className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none"
+                      />
+
+                      {loginMessage && (
+                        <div
+                          role="alert"
+                          className="rounded-2xl bg-red-50 px-4 py-3 text-sm leading-5 text-red-700"
+                        >
+                          {loginMessage[language]}
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={loginClient}
+                        disabled={authBusy}
+                        className="w-full rounded-full bg-[#171717] py-4 text-sm text-white active:scale-95 disabled:opacity-50"
+                      >
+                        {authBusy ? text.signingIn : text.enter}
+                      </button>
+                    </div>
+                  ) : (
                   <div className="mt-4 space-y-3">
 
                     <input
@@ -2500,30 +3202,9 @@ export default function Home() {
                         )
                       }
                       placeholder={`${text.name} *`}
+                      autoComplete="name"
                       className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none"
                     />
-
-                    <div className="relative">
-                      <input
-                        value={password}
-                        onChange={(e) =>
-                          setPassword(
-                            e.target.value
-                          )
-                        }
-                        placeholder={`${text.password} *`}
-                        type={showCheckoutPassword ? "text" : "password"}
-                        className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 pr-12 outline-none"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setShowCheckoutPassword((value) => !value)}
-                        className="absolute right-3 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center rounded-full text-lg"
-                        aria-label={showCheckoutPassword ? "Скрыть пароль" : "Показать пароль"}
-                      >
-                        {showCheckoutPassword ? "🙈" : "👁️"}
-                      </button>
-                    </div>
 
                     <UzPhoneInput
                       value={phone}
@@ -2531,6 +3212,26 @@ export default function Home() {
                       placeholder="XX XXX XX XX *"
                       className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none"
                     />
+
+                    {!user && (
+                      <>
+                        <PasswordInput
+                          value={password}
+                          onChange={setPassword}
+                          placeholder={`${text.createPassword} *`}
+                          autoComplete="new-password"
+                          className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none"
+                        />
+
+                        <PasswordInput
+                          value={passwordRepeat}
+                          onChange={setPasswordRepeat}
+                          placeholder={`${text.repeatPassword} *`}
+                          autoComplete="new-password"
+                          className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none"
+                        />
+                      </>
+                    )}
 
                     {savedAddresses.length > 0 ? (
                       <div className="space-y-2">
@@ -2648,6 +3349,15 @@ export default function Home() {
 
                     </div>
 
+                    {orderError && (
+                      <div
+                        role="alert"
+                        className="rounded-2xl bg-red-50 px-4 py-3 text-sm leading-5 text-red-700"
+                      >
+                        {orderError[language]}
+                      </div>
+                    )}
+
                     <button
                       onClick={
                         createOrder
@@ -2665,6 +3375,7 @@ export default function Home() {
                     </button>
 
                   </div>
+                  )}
 
                 </div>
               </>
@@ -2711,45 +3422,100 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="mt-5 space-y-3">
-                  <UzPhoneInput
-                    value={loginPhone}
-                    onChange={setLoginPhone}
-                    placeholder="XX XXX XX XX"
-                    className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
+                <div className="mt-5">
+                  <SegmentedSwitch
+                    value={authTab}
+                    options={[
+                      { value: "login", label: text.enter },
+                      { value: "register", label: text.register },
+                    ]}
+                    onChange={(nextTab) => {
+                      setAuthTab(nextTab);
+                      setLoginMessage(null);
+                      setRegisterMessage(null);
+                    }}
                   />
-
-                  <div className="relative">
-                    <input
-                      value={loginPassword}
-                      onChange={(e) => setLoginPassword(e.target.value)}
-                      placeholder={text.password}
-                      type={showLoginPassword ? "text" : "password"}
-                      className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 pr-12 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowLoginPassword((value) => !value)}
-                      className="absolute right-2.5 top-1/2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-base opacity-70 transition hover:opacity-100"
-                      aria-label={showLoginPassword ? "Скрыть пароль" : "Показать пароль"}
-                    >
-                      {showLoginPassword ? "🙈" : "👁️"}
-                    </button>
-                  </div>
-
-                  <button
-                    onClick={loginClient}
-                    className="w-full rounded-full bg-[#171717] py-4 text-sm font-medium text-white transition active:scale-[0.99]"
-                  >
-                    {text.enter}
-                  </button>
-
-                  {loginMessage && (
-                    <p className="text-center text-sm text-red-600">
-                      {loginMessage}
-                    </p>
-                  )}
                 </div>
+
+                {authTab === "login" ? (
+                  <div className="mt-4 space-y-3">
+                    <UzPhoneInput
+                      value={loginPhone}
+                      onChange={setLoginPhone}
+                      placeholder="XX XXX XX XX"
+                      className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
+                    />
+
+                    <PasswordInput
+                      value={loginPassword}
+                      onChange={setLoginPassword}
+                      placeholder={text.password}
+                      className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
+                    />
+
+                    <button
+                      onClick={loginClient}
+                      disabled={authBusy}
+                      className="w-full rounded-full bg-[#171717] py-4 text-sm font-medium text-white transition active:scale-[0.99] disabled:opacity-50"
+                    >
+                      {authBusy ? text.signingIn : text.enter}
+                    </button>
+
+                    {loginMessage && (
+                      <p role="alert" className="text-center text-sm leading-5 text-red-600">
+                        {loginMessage[language]}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-4 space-y-3">
+                    <input
+                      value={registerName}
+                      onChange={(e) => setRegisterName(e.target.value)}
+                      placeholder={text.name}
+                      autoComplete="name"
+                      className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
+                    />
+
+                    <UzPhoneInput
+                      value={registerPhone}
+                      onChange={setRegisterPhone}
+                      placeholder="XX XXX XX XX"
+                      className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
+                    />
+
+                    <PasswordInput
+                      value={registerPassword}
+                      onChange={setRegisterPassword}
+                      placeholder={text.createPassword}
+                      autoComplete="new-password"
+                      className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
+                    />
+
+                    <PasswordInput
+                      value={registerPasswordRepeat}
+                      onChange={setRegisterPasswordRepeat}
+                      placeholder={text.repeatPassword}
+                      autoComplete="new-password"
+                      className="w-full rounded-2xl bg-[#f4f0e9] px-4 py-3.5 outline-none transition focus:ring-2 focus:ring-[#c7a97f]/30"
+                    />
+
+                    <button
+                      onClick={registerClient}
+                      disabled={authBusy}
+                      className="w-full rounded-full bg-[#171717] py-4 text-sm font-medium text-white transition active:scale-[0.99] disabled:opacity-50"
+                    >
+                      {authBusy ? text.registering : text.registerAction}
+                    </button>
+
+                    {registerMessage && (
+                      <p role="alert" className="text-center text-sm leading-5 text-red-600">
+                        {registerMessage[language]}
+                      </p>
+                    )}
+                  </div>
+                )}
+
               </div>
             ) : (
               <>
@@ -3213,7 +3979,14 @@ export default function Home() {
       >
         <div className="grid grid-cols-4">
           <NavButton active={tab === "home"} icon="home" label={text.home} onClick={() => changeTab("home")} />
-          <NavButton active={tab === "favorites"} icon="favorites" label={text.favorites} onClick={() => changeTab("favorites")} />
+          <NavButton
+            active={tab === "favorites"}
+            icon="favorites"
+            label={text.favorites}
+            onClick={() => changeTab("favorites")}
+            iconColor={themeMode === "dark" ? FAVORITE_COLOR.dark : FAVORITE_COLOR.light}
+            iconFilled={favorites.length > 0}
+          />
           <NavButton
             active={tab === "cart"}
             icon="cart"
@@ -3234,11 +4007,16 @@ function NavButton({
   icon,
   label,
   onClick,
+  iconColor,
+  iconFilled = false,
 }: {
   active: boolean;
   icon: "home" | "favorites" | "cart" | "settings";
   label: string;
   onClick: () => void;
+  // Для сердца «Избранное»: синий цвет; заполнено, если в избранном что-то есть.
+  iconColor?: string;
+  iconFilled?: boolean;
 }) {
   return (
     <button
@@ -3248,7 +4026,11 @@ function NavButton({
         active ? "active scale-105" : ""
       }`}
     >
-      <span className="flex h-6 w-6 items-center justify-center" aria-hidden="true">
+      <span
+        className="flex h-6 w-6 items-center justify-center"
+        style={iconColor ? { color: iconColor } : undefined}
+        aria-hidden="true"
+      >
         {icon === "home" && (
           <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
             <path d="m3 10 9-7 9 7" />
@@ -3257,7 +4039,7 @@ function NavButton({
           </svg>
         )}
         {icon === "favorites" && (
-          <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+          <svg viewBox="0 0 24 24" className="h-[18px] w-[18px]" fill={iconFilled ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
             <path d="M20.8 8.6c0 5.1-8.8 10.1-8.8 10.1S3.2 13.7 3.2 8.6A4.6 4.6 0 0 1 12 6.2a4.6 4.6 0 0 1 8.8 2.4Z" />
           </svg>
         )}
