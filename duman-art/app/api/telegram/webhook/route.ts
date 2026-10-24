@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import crypto from "node:crypto";
 
+import { SHOP_PHONE } from "../../../shopConfig";
+
 // Webhook Telegram-бота. Повторяет поведение bot/index.js, но работает
 // внутри Next.js, поэтому сайт и бот живут в одном веб-сервисе.
 
 type TelegramUser = {
   id: number;
   username?: string;
+  language_code?: string;
 };
 
 type TelegramChat = {
@@ -199,10 +202,31 @@ function sendShop(chatId: number, storeUrl: string) {
   );
 }
 
+// Mini App сразу на вкладке «Мои заказы» (параметр tab читает app/page.tsx).
+function ordersKeyboard(storeUrl: string, uz: boolean): InlineKeyboard {
+  return {
+    inline_keyboard: [
+      [
+        {
+          text: uz ? "📦 Buyurtmalarim" : "📦 Мои заказы",
+          web_app: { url: `${storeUrl}/?tab=orders` },
+        },
+      ],
+    ],
+  };
+}
+
+function contactText(uz: boolean) {
+  return uz
+    ? `📞 Duman Art\n\nTelefon: ${SHOP_PHONE}\nSavollar bo‘lsa, qo‘ng‘iroq qiling yoki shu chatga yozing.`
+    : `📞 Duman Art\n\nТелефон: ${SHOP_PHONE}\nЗвоните или пишите в этот чат — ответим на вопросы.`;
+}
+
 async function handleMessage(message: TelegramMessage, storeUrl: string) {
   const command = await parseCommand(message.text);
   const chatId = message.chat.id;
   const userId = message.from?.id;
+  const uz = message.from?.language_code === "uz";
 
   switch (command) {
     case "start":
@@ -218,6 +242,20 @@ async function handleMessage(message: TelegramMessage, storeUrl: string) {
 
     case "shop":
       await sendShop(chatId, storeUrl);
+      break;
+
+    case "orders":
+      await sendMessage(
+        chatId,
+        uz
+          ? "📦 Buyurtmalaringiz va ularning holati — ilovada."
+          : "📦 Ваши заказы и их статусы — в приложении.",
+        ordersKeyboard(storeUrl, uz)
+      );
+      break;
+
+    case "contact":
+      await sendMessage(chatId, contactText(uz));
       break;
 
     case "myid":
@@ -246,7 +284,7 @@ async function handleCallbackQuery(
         mainMenu(storeUrl, query.from.id)
       ),
     contact: (chatId) =>
-      sendMessage(chatId, "📞 Duman Art\n\nТелефон: +998 87 907 01 07"),
+      sendMessage(chatId, contactText(query.from.language_code === "uz")),
   };
 
   const action = query.data ? actions[query.data] : undefined;

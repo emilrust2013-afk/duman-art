@@ -13,6 +13,7 @@
     "webhook:set": "node --env-file-if-exists=.env.local scripts/set-webhook.mjs",
     "webhook:delete": "node --env-file-if-exists=.env.local scripts/delete-webhook.mjs",
     "webhook:info": "node --env-file-if-exists=.env.local scripts/webhook-info.mjs",
+    "bot:setup": "node --env-file-if-exists=.env.local scripts/bot-setup.mjs",
     "admin:claims": "node --env-file-if-exists=.env.local scripts/set-admin-claims.mjs"
   },
   "dependencies": {
