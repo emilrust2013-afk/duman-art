@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, type TouchEvent } from "react";
 import { collection, getDocs, type DocumentData } from "firebase/firestore";
 import { db } from "./firebase";
 import { FAVORITE_COLOR } from "./shopConfig";
+import PhotoViewer from "./PhotoViewer";
 
 type Language = "ru" | "uz";
 
@@ -211,7 +212,7 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
     null
   );
   const [selectedImage, setSelectedImage] = useState(0);
-  const [zoomed, setZoomed] = useState(false);
+  const [viewerOpen, setViewerOpen] = useState(false);
   const [touchStartX, setTouchStartX] = useState<number | null>(null);
 
   const [isDark, setIsDark] = useState(false);
@@ -423,14 +424,14 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
   function openProduct(product: Product) {
     setSelectedProduct(product);
     setSelectedImage(0);
-    setZoomed(false);
+    setViewerOpen(false);
     setTouchStartX(null);
   }
 
   function closeProduct() {
     setSelectedProduct(null);
     setSelectedImage(0);
-    setZoomed(false);
+    setViewerOpen(false);
     setTouchStartX(null);
   }
 
@@ -446,7 +447,6 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
       (nextIndex + images.length) % images.length;
 
     setSelectedImage(safeIndex);
-    setZoomed(false);
   }
 
   function handleTouchStart(
@@ -817,13 +817,8 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
                     key={`${selectedImages[selectedImage]}-${selectedImage}`}
                     src={selectedImages[selectedImage]}
                     alt={selectedName}
-                    onClick={() => setZoomed((current) => !current)}
-                    onDoubleClick={() => setZoomed((current) => !current)}
-                    className={`duman-product-image h-full w-full object-contain select-none transition-transform duration-300 ${
-                      zoomed
-                        ? "scale-[1.75] cursor-zoom-out"
-                        : "scale-100 cursor-zoom-in"
-                    }`}
+                    onClick={() => setViewerOpen(true)}
+                    className="duman-product-image h-full w-full cursor-zoom-in object-contain select-none"
                     draggable={false}
                   />
                 ) : (
@@ -894,7 +889,7 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
                 </>
               )}
 
-              {!zoomed && selectedImages.length > 1 && (
+              {selectedImages.length > 1 && (
                 <div className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full px-2.5 py-2 backdrop-blur bg-black/20">
                   {selectedImages.map((_, index) => (
                     <button
@@ -919,19 +914,6 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
                 </div>
               )}
 
-              {zoomed && (
-                <div
-                  className={`absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full px-3 py-1.5 text-[10px] backdrop-blur ${
-                    isDark
-                      ? "bg-black/45 text-white"
-                      : "bg-white/90 text-[#514a43]"
-                  }`}
-                >
-                  {ru
-                    ? "Нажмите на фото, чтобы вернуть размер"
-                    : "Asl o‘lchamga qaytish uchun rasmga bosing"}
-                </div>
-              )}
             </div>
 
             {selectedImages.length > 1 && (
@@ -1083,6 +1065,18 @@ export default function HomeCatalog({ language, deliveryNote }: Props) {
             </div>
           </div>
         </div>
+      )}
+
+      {selectedProduct && (
+        <PhotoViewer
+          open={viewerOpen}
+          images={selectedImages}
+          index={selectedImage}
+          alt={selectedName}
+          ru={ru}
+          onClose={() => setViewerOpen(false)}
+          onIndexChange={setSelectedImage}
+        />
       )}
     </div>
   );

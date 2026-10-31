@@ -14,6 +14,20 @@ type TelegramWebApp = {
   };
   ready?: () => void;
   expand?: () => void;
+  version?: string;
+  isVersionAtLeast?: (version: string) => boolean;
+  // Bot API 7.7+
+  isVerticalSwipesEnabled?: boolean;
+  disableVerticalSwipes?: () => void;
+  enableVerticalSwipes?: () => void;
+  // Bot API 6.1+
+  BackButton?: {
+    isVisible: boolean;
+    show: () => void;
+    hide: () => void;
+    onClick: (callback: () => void) => void;
+    offClick: (callback: () => void) => void;
+  };
 };
 
 interface Window {
