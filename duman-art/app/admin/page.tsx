@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import Script from "next/script";
 import {
   browserLocalPersistence,
@@ -11,7 +11,6 @@ import {
   User,
 } from "firebase/auth";
 import {
-  addDoc,
   collection,
   deleteDoc,
   doc,
@@ -23,13 +22,13 @@ import {
   setDoc,
   updateDoc,
 } from "firebase/firestore";
-import {
-  getDownloadURL,
-  ref,
-  uploadBytes,
-} from "firebase/storage";
-
-import { auth, db, storage } from "../firebase";
+import { auth, db } from "../firebase";
+import PhotoPicker, {
+  PhotoItem,
+  revokePhotos,
+  savedPhotos,
+  uploadPhotos,
+} from "./PhotoPicker";
 import {
   ADMIN_PAYMENT_BUTTONS,
   INITIAL_ORDER_STATUS,
@@ -150,8 +149,10 @@ export default function AdminPage() {
   const [productCollection, setProductCollection] = useState("Elvi");
 
   const [available, setAvailable] = useState(true);
-  const [newImages, setNewImages] = useState<File[]>([]);
+  const [newPhotos, setNewPhotos] = useState<PhotoItem[]>([]);
   const [addingProduct, setAddingProduct] = useState(false);
+  const [photosBusy, setPhotosBusy] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState("");
 
   // =========================
   // PRODUCTS
@@ -175,8 +176,7 @@ export default function AdminPage() {
   const [editCollection, setEditCollection] = useState("Elvi");
   const [editAvailable, setEditAvailable] = useState(true);
 
-  const [editImages, setEditImages] = useState<File[]>([]);
-  const [editImageUrls, setEditImageUrls] = useState<string[]>([]);
+  const [editPhotos, setEditPhotos] = useState<PhotoItem[]>([]);
 
   const [savingEdit, setSavingEdit] = useState(false);
 
@@ -443,42 +443,20 @@ export default function AdminPage() {
   // IMAGE UPLOAD
   // =========================
 
-  async function uploadProductImages(
-    files: File[],
-    productId: string
-  ) {
-    const urls: string[] = [];
-
-    for (const file of files) {
-      const safeName = `${Date.now()}-${file.name.replace(
-        /[^a-zA-Z0-9._-]/g,
-        "_"
-      )}`;
-
-      const storageRef = ref(
-        storage,
-        `products/${productId}/${safeName}`
-      );
-
-      await uploadBytes(storageRef, file);
-      const url = await getDownloadURL(storageRef);
-
-      urls.push(url);
-    }
-
-    return urls;
+  function showUploadProgress(done: number, total: number) {
+    setUploadProgress(`Загружаем фото ${done} из ${total}…`);
   }
+
+  // Последние списки фото — чтобы освободить превью при уходе со страницы.
+  const photosRef = useRef<PhotoItem[]>([]);
+  useEffect(() => {
+    photosRef.current = [...newPhotos, ...editPhotos];
+  }, [newPhotos, editPhotos]);
+  useEffect(() => () => revokePhotos(photosRef.current), []);
 
   // =========================
   // ADD PRODUCT
   // =========================
-
-  function handleImageSelect(
-    event: ChangeEvent<HTMLInputElement>
-  ) {
-    const files = Array.from(event.target.files || []);
-    setNewImages(files);
-  }
 
   async function addProduct(event: FormEvent) {
     event.preventDefault();
@@ -514,7 +492,12 @@ export default function AdminPage() {
       return;
     }
 
-    if (newImages.length === 0) {
+    if (photosBusy) {
+      setMessage("Подождите, фото ещё обрабатываются");
+      return;
+    }
+
+    if (newPhotos.length === 0) {
       setMessage("Добавь хотя бы одну фотографию");
       return;
     }
@@ -522,8 +505,18 @@ export default function AdminPage() {
     try {
       setAddingProduct(true);
 
-      // Сначала создаём документ
-      const productRef = await addDoc(collection(db, "products"), {
+      // Сначала загружаем фото (id документа берём заранее), потом создаём
+      // товар — так в магазине не появится товар без фотографий.
+      const productRef = doc(collection(db, "products"));
+
+      const imageUrls = await uploadPhotos(
+        newPhotos,
+        productRef.id,
+        showUploadProgress
+      );
+      setUploadProgress("Сохраняем товар…");
+
+      await setDoc(productRef, {
         nameRu: nameRu.trim(),
         nameUz: nameUz.trim(),
 
@@ -538,19 +531,9 @@ export default function AdminPage() {
         collection: productCollection,
         available,
 
-        imageUrls: [],
-        createdAt: serverTimestamp(),
-      });
-
-      // Потом загружаем фото
-      const imageUrls = await uploadProductImages(
-        newImages,
-        productRef.id
-      );
-
-      await updateDoc(productRef, {
         imageUrls,
         imageUrl: imageUrls[0] || "",
+        createdAt: serverTimestamp(),
       });
 
       setNameRu("");
@@ -562,14 +545,18 @@ export default function AdminPage() {
       setPrice("");
       setProductCollection("Elvi");
       setAvailable(true);
-      setNewImages([]);
+      revokePhotos(newPhotos);
+      setNewPhotos([]);
 
       setMessage("✅ Товар успешно добавлен");
     } catch (error) {
       console.error(error);
-      setMessage("Ошибка при добавлении товара");
+      setMessage(
+        "Ошибка при добавлении товара. Фото остались выбранными — попробуйте ещё раз."
+      );
     } finally {
       setAddingProduct(false);
+      setUploadProgress("");
     }
   }
 
@@ -605,27 +592,23 @@ export default function AdminPage() {
     setEditCollection(product.collection || "Elvi");
     setEditAvailable(product.available !== false);
 
-    setEditImages([]);
-    setEditImageUrls(
-      product.imageUrls && product.imageUrls.length > 0
-        ? product.imageUrls
-        : product.imageUrl
-        ? [product.imageUrl]
-        : []
+    revokePhotos(editPhotos);
+    setEditPhotos(
+      savedPhotos(
+        product.imageUrls && product.imageUrls.length > 0
+          ? product.imageUrls
+          : product.imageUrl
+          ? [product.imageUrl]
+          : []
+      )
     );
   }
 
-  function handleEditImageSelect(
-    event: ChangeEvent<HTMLInputElement>
-  ) {
-    const files = Array.from(event.target.files || []);
-    setEditImages(files);
-  }
-
-  function removeEditImage(index: number) {
-    setEditImageUrls((current) =>
-      current.filter((_, i) => i !== index)
-    );
+  function closeEditProduct() {
+    if (savingEdit) return;
+    revokePhotos(editPhotos);
+    setEditPhotos([]);
+    setEditingProduct(null);
   }
 
   async function saveEditedProduct() {
@@ -658,23 +641,26 @@ export default function AdminPage() {
       return;
     }
 
+    if (photosBusy) {
+      setMessage("Подождите, фото ещё обрабатываются");
+      return;
+    }
+
+    if (editPhotos.length === 0) {
+      setMessage("Добавь хотя бы одну фотографию");
+      return;
+    }
+
     try {
       setSavingEdit(true);
       setMessage("");
 
-      let finalImageUrls = [...editImageUrls];
-
-      if (editImages.length > 0) {
-        const uploaded = await uploadProductImages(
-          editImages,
-          editingProduct.id
-        );
-
-        finalImageUrls = [
-          ...finalImageUrls,
-          ...uploaded,
-        ];
-      }
+      const finalImageUrls = await uploadPhotos(
+        editPhotos,
+        editingProduct.id,
+        showUploadProgress
+      );
+      setUploadProgress("Сохраняем товар…");
 
       await updateDoc(
         doc(db, "products", editingProduct.id),
@@ -700,15 +686,19 @@ export default function AdminPage() {
       );
 
       setEditingProduct(null);
-      setEditImages([]);
+      revokePhotos(editPhotos);
+      setEditPhotos([]);
       setMessage("✅ Товар обновлён");
 
       await loadProducts();
     } catch (error) {
       console.error(error);
-      setMessage("Ошибка при сохранении товара");
+      setMessage(
+        "Ошибка при сохранении товара. Изменения не сохранены — попробуйте ещё раз."
+      );
     } finally {
       setSavingEdit(false);
+      setUploadProgress("");
     }
   }
 
@@ -1274,29 +1264,21 @@ export default function AdminPage() {
                   Фотографии
                 </label>
 
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  onChange={handleImageSelect}
-                  className="block w-full rounded-2xl border border-dashed border-[#cfc5b9] bg-[#faf8f5] px-4 py-5 text-sm"
+                <PhotoPicker
+                  items={newPhotos}
+                  onChange={setNewPhotos}
+                  disabled={addingProduct}
+                  onBusyChange={setPhotosBusy}
                 />
-
-                {newImages.length > 0 && (
-                  <p className="mt-2 text-xs text-[#777066]">
-                    Выбрано фотографий:{" "}
-                    {newImages.length}
-                  </p>
-                )}
               </div>
 
               <button
                 type="submit"
-                disabled={addingProduct}
+                disabled={addingProduct || photosBusy}
                 className="w-full rounded-full bg-[#171717] px-5 py-4 text-sm text-white disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {addingProduct
-                  ? "Добавляем товар..."
+                  ? uploadProgress || "Добавляем товар..."
                   : "Добавить товар"}
               </button>
             </form>
@@ -1822,7 +1804,7 @@ export default function AdminPage() {
       {editingProduct && (
         <div
           className="fixed inset-0 z-50 flex items-end bg-black/50 p-0 md:items-center md:justify-center md:p-5"
-          onClick={() => setEditingProduct(null)}
+          onClick={closeEditProduct}
         >
           <div
             className="max-h-[92vh] w-full overflow-y-auto rounded-t-[30px] bg-[#f6f2ec] p-5 md:max-w-3xl md:rounded-[30px]"
@@ -1843,9 +1825,7 @@ export default function AdminPage() {
 
               <button
                 type="button"
-                onClick={() =>
-                  setEditingProduct(null)
-                }
+                onClick={closeEditProduct}
                 className="flex h-10 w-10 items-center justify-center rounded-full bg-white"
               >
                 ✕
@@ -1977,56 +1957,22 @@ export default function AdminPage() {
                   Фотографии
                 </p>
 
-                <div className="grid grid-cols-3 gap-3 md:grid-cols-5">
-                  {editImageUrls.map(
-                    (image, index) => (
-                      <div
-                        key={`${image}-${index}`}
-                        className="relative aspect-square overflow-hidden rounded-2xl bg-white"
-                      >
-                        <img
-                          src={image}
-                          alt=""
-                          className="h-full w-full object-cover"
-                        />
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            removeEditImage(index)
-                          }
-                          className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-white/90 text-sm shadow"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    )
-                  )}
-                </div>
-
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  onChange={handleEditImageSelect}
-                  className="mt-3 block w-full rounded-2xl border border-dashed border-[#cfc5b9] bg-white px-4 py-5 text-sm"
+                <PhotoPicker
+                  items={editPhotos}
+                  onChange={setEditPhotos}
+                  disabled={savingEdit}
+                  onBusyChange={setPhotosBusy}
                 />
-
-                {editImages.length > 0 && (
-                  <p className="mt-2 text-xs text-[#777066]">
-                    Новых фото: {editImages.length}
-                  </p>
-                )}
               </div>
 
               <button
                 type="button"
                 onClick={saveEditedProduct}
-                disabled={savingEdit}
+                disabled={savingEdit || photosBusy}
                 className="w-full rounded-full bg-[#171717] px-5 py-4 text-sm text-white disabled:opacity-50"
               >
                 {savingEdit
-                  ? "Сохраняем..."
+                  ? uploadProgress || "Сохраняем..."
                   : "Сохранить изменения"}
               </button>
             </div>
